@@ -530,7 +530,7 @@ docker compose up -d
 ```bash
 wrangler secret put TELEGRAM_BOT_TOKEN
 wrangler secret put TELEGRAM_CHAT_ID
-wrangler secret put ANTHROPIC_API_KEY
+wrangler secret put GEMINI_API_KEY
 wrangler deploy
 ```
 

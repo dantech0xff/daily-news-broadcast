@@ -12,8 +12,8 @@ binding = "NEWS_CACHE"
 id = "8d9fb458825a46b68c7efcca93133b51"
 
 [vars]
-AI_PROVIDER = "openai"
-AI_MODEL = "gpt-4o-mini"
+AI_PROVIDER = "gemini"
+AI_MODEL = "gemini-3.1-flash-lite"
 BROADCAST_MODE = "drip"
 DRIP_BATCH_SIZE = "1"
 DRIP_DELAY_MS = "0"
