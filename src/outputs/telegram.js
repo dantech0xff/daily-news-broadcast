@@ -18,6 +18,7 @@ import {
 } from './telegram-client.js';
 
 const CAPTION_MAX = 1024;
+const RICH_MEDIA_ID = 'article_image';
 
 export class TelegramOutput extends OutputPlugin {
   /**
@@ -159,6 +160,31 @@ export class TelegramOutput extends OutputPlugin {
       };
     }
 
+    const richResult = await this._sendRichPhoto(imageUrl, content, signal);
+    if (richResult.success) {
+      return successResult(richResult.messageId, {
+        ...richResult.meta,
+        parts: 1,
+        partsAttempted: 1,
+        partsTotal: 1,
+        hasPhoto: true,
+        richMessageAttempted: true,
+        successfulMessageIds: richResult.messageId ? [richResult.messageId] : [],
+        partResults: [partResult(1, richResult, 'rich_message')],
+      });
+    }
+
+    if (!isDefinitiveContentRejection(richResult)) {
+      return {
+        ...richResult,
+        meta: {
+          ...richResult.meta,
+          photoAttempted: true,
+          richMessageAttempted: true,
+        },
+      };
+    }
+
     const messages = splitSmart(content, this.maxLength);
     const totalSteps = messages.length + 1;
     const photoResult = await this._sendPhoto(imageUrl, null, signal);
@@ -172,6 +198,7 @@ export class TelegramOutput extends OutputPlugin {
             ...fallback.meta,
             fallbackAttempted: true,
             photoAttempted: true,
+            richMessageAttempted: true,
             hasPhoto: false,
           },
         };
@@ -186,6 +213,7 @@ export class TelegramOutput extends OutputPlugin {
           partsTotal: totalSteps,
           failedAt: 1,
           photoAttempted: true,
+          richMessageAttempted: true,
           partResults: [partResult(1, photoResult, 'photo')],
         },
       };
@@ -193,7 +221,7 @@ export class TelegramOutput extends OutputPlugin {
 
     const successfulMessageIds = photoResult.messageId ? [photoResult.messageId] : [];
     const partResults = [partResult(1, photoResult, 'photo')];
-    let fallbackAttempted = photoResult.meta?.fallbackAttempted === true;
+    let fallbackAttempted = true;
     await this._dependencies.sleep(300);
 
     for (let i = 0; i < messages.length; i++) {
@@ -220,6 +248,7 @@ export class TelegramOutput extends OutputPlugin {
           meta: {
             ...partial.meta,
             hasPhoto: true,
+            richMessageAttempted: true,
             ...(fallbackAttempted ? { fallbackAttempted: true } : {}),
           },
         };
@@ -234,10 +263,40 @@ export class TelegramOutput extends OutputPlugin {
       partsAttempted: totalSteps,
       partsTotal: totalSteps,
       hasPhoto: true,
+      richMessageAttempted: true,
       successfulMessageIds,
       partResults,
       ...(fallbackAttempted ? { fallbackAttempted: true } : {}),
     });
+  }
+
+  async _sendRichPhoto(photoUrl, content, signal) {
+    const body = {
+      chat_id: this._config.chatId,
+      rich_message: {
+        markdown: `![](tg://photo?id=${RICH_MEDIA_ID})\n\n${toRichMarkdown(content)}`,
+        media: [{
+          id: RICH_MEDIA_ID,
+          media: { type: 'photo', media: photoUrl },
+        }],
+      },
+      disable_notification: this._config.silent,
+    };
+
+    const result = await this._request('sendRichMessage', body, signal);
+    if (result.success || !isDefinitiveFormatRejection(result)) return result;
+
+    body.rich_message = {
+      blocks: [
+        { type: 'photo', photo: { type: 'photo', media: photoUrl } },
+        { type: 'paragraph', text: stripMarkdown(content) },
+      ],
+    };
+    const fallback = await this._request('sendRichMessage', body, signal);
+    return {
+      ...fallback,
+      meta: { ...fallback.meta, fallbackAttempted: true },
+    };
   }
 
   async _sendPhoto(photoUrl, caption, signal) {
@@ -386,4 +445,8 @@ function stripMarkdown(text) {
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/_([^_]+)_/g, '$1')
     .replace(/`([^`]+)`/g, '$1');
+}
+
+function toRichMarkdown(text) {
+  return text.replace(/(?<![\\*])\*([^*\n]+)\*(?!\*)/g, '**$1**');
 }

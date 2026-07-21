@@ -178,6 +178,80 @@ test('Telegram sanitizes provider errors and never exposes its destination or to
   assert.doesNotMatch(serialized, /super-secret-token/);
 });
 
+test('Telegram sends a long photo post as one rich message', async () => {
+  const transport = sequenceFetch([
+    jsonResponse(200, { ok: true, result: { message_id: 50 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+  const content = `*Important*\n\n${'x'.repeat(1_500)}`;
+
+  const result = await output.send(content, {
+    article: { imageUrl: 'https://example.test/image.png' },
+  });
+
+  assertCanonicalResult(result, 'success', 'never');
+  assert.equal(result.messageId, '50');
+  assert.equal(result.meta.hasPhoto, true);
+  assert.equal(result.meta.parts, 1);
+  assert.equal(transport.calls.length, 1);
+  assert.match(transport.calls[0].url, /\/sendRichMessage$/);
+
+  const body = JSON.parse(transport.calls[0].init.body);
+  assert.equal(body.chat_id, config.chatId);
+  assert.match(body.rich_message.markdown, /^!\[\]\(tg:\/\/photo\?id=article_image\)/);
+  assert.match(body.rich_message.markdown, /\*\*Important\*\*/);
+  assert.deepEqual(body.rich_message.media, [{
+    id: 'article_image',
+    media: { type: 'photo', media: 'https://example.test/image.png' },
+  }]);
+});
+
+test('Telegram retries rejected rich Markdown as one plain rich message', async () => {
+  const transport = sequenceFetch([
+    jsonResponse(400, {
+      ok: false,
+      error_code: 400,
+      description: "Bad Request: can't parse rich message",
+    }),
+    jsonResponse(200, { ok: true, result: { message_id: 51 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+
+  const result = await output.send(`*Important*\n\n${'x'.repeat(1_500)}`, {
+    article: { imageUrl: 'https://example.test/image.png' },
+  });
+
+  assertCanonicalResult(result, 'success', 'never');
+  assert.equal(result.messageId, '51');
+  assert.equal(result.meta.parts, 1);
+  assert.equal(result.meta.fallbackAttempted, true);
+  assert.equal(transport.calls.length, 2);
+  assert.match(transport.calls[1].url, /\/sendRichMessage$/);
+
+  const fallbackBody = JSON.parse(transport.calls[1].init.body);
+  assert.deepEqual(fallbackBody.rich_message.blocks[0], {
+    type: 'photo',
+    photo: { type: 'photo', media: 'https://example.test/image.png' },
+  });
+  assert.match(fallbackBody.rich_message.blocks[1].text, /^Important/);
+});
+
+test('Telegram never falls back after an ambiguous rich-message response', async () => {
+  const transport = sequenceFetch([
+    jsonResponse(500, { ok: false, description: 'upstream error' }),
+    jsonResponse(200, { ok: true, result: { message_id: 52 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+
+  const result = await output.send('x'.repeat(1_500), {
+    article: { imageUrl: 'https://example.test/image.png' },
+  });
+
+  assertCanonicalResult(result, 'ambiguous', 'manual');
+  assert.equal(result.meta.richMessageAttempted, true);
+  assert.equal(transport.calls.length, 1);
+});
+
 test('Telegram photo fallback is blocked after uncertainty and long-photo flows stop on failure', async () => {
   const uncertainPhoto = sequenceFetch([
     jsonResponse(500, { ok: false, description: 'upstream error' }),
@@ -193,6 +267,7 @@ test('Telegram photo fallback is blocked after uncertainty and long-photo flows 
   assert.equal(uncertainPhoto.calls.length, 1);
 
   const partialPhoto = sequenceFetch([
+    jsonResponse(404, { ok: false, error_code: 404, description: 'Not Found' }),
     jsonResponse(200, { ok: true, result: { message_id: 61 } }),
     jsonResponse(400, { ok: false, error_code: 400, description: 'text rejected' }),
     jsonResponse(200, { ok: true, result: { message_id: 63 } }),
@@ -206,5 +281,6 @@ test('Telegram photo fallback is blocked after uncertainty and long-photo flows 
   assertCanonicalResult(partial, 'ambiguous', 'manual');
   assert.equal(partial.messageId, '61');
   assert.deepEqual(partial.meta.successfulMessageIds, ['61']);
-  assert.equal(partialPhoto.calls.length, 2);
+  assert.equal(partial.meta.richMessageAttempted, true);
+  assert.equal(partialPhoto.calls.length, 3);
 });
