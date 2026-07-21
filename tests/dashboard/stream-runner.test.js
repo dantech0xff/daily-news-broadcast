@@ -48,7 +48,7 @@ test('executeStream preserves drip mode and explicit trigger semantics', async (
   assert.match(calls[2].idempotencyKey, /^[a-f0-9]{64}$/);
   assert.match(calls[2].requestId, /^[a-f0-9]{64}$/);
   assert.notEqual(calls[2].idempotencyKey, 'force-1');
-  assert.equal(calls[2].operatorForce, true);
+  assert.equal(calls[2].operatorForce, undefined);
 });
 
 test('preview is mode-aware and read-only at the engine boundary', async () => {

@@ -295,7 +295,6 @@ export async function runChannels(channels, options = {}) {
       const runOptions = {
         force: forced,
         ...(forceIdentifiers ?? {}),
-        ...(forced && { operatorForce: true }),
         requestedAt: now,
       };
       const result = ch.mode === 'drip'

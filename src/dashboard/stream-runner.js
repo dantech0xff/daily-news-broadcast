@@ -235,7 +235,6 @@ export async function executeStream(streamConfig, options = {}, dependencies = {
       dryRun,
       force: !dryRun && triggerType === 'force',
       ...(forceIdentifiers ?? {}),
-      ...(!dryRun && triggerType === 'force' ? { operatorForce: true } : {}),
       ...(options.requestedAt && { requestedAt: options.requestedAt }),
     };
     const result = (resolvedStream.mode || 'digest') === 'drip'

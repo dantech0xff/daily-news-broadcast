@@ -56,7 +56,7 @@ test('force trigger reaches both digest and drip engines', async () => {
   assert.match(drip.calls[0].options.idempotencyKey, /^[a-f0-9]{64}$/);
   assert.notEqual(drip.calls[0].options.idempotencyKey, digest.calls[0].options.idempotencyKey);
   assert.notEqual(drip.calls[0].options.requestId, digest.calls[0].options.requestId);
-  assert.equal(digest.calls[0].options.operatorForce, true);
+  assert.equal(digest.calls[0].options.operatorForce, undefined);
 });
 
 test('legacy force maps to explicit force and emits one deprecation warning', async () => {
