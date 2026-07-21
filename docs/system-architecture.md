@@ -2,182 +2,187 @@
 
 ## Overview
 
-NewsEngine is a plugin-based news aggregation system with a composable pipeline architecture. Every component (source, AI, output, cache) is a swappable plugin registered at runtime.
+NewsEngine is a composable delivery engine. Sources, AI providers, outputs, and caches are plugins. Delivery correctness now depends on a durable state machine and a durable store, not on best-effort cache writes.
 
-## Core Architecture
+## Topology
 
-```
-                        ┌──────────────────────┐
-                        │     Runtime Adapter   │
-                        │  (Cloudflare / Node)  │
-                        └──────────┬───────────┘
-                                   │
-                        ┌──────────▼───────────┐
-                        │   Channel System      │
-                        │  definitions.js       │
-                        │  runner.js            │
-                        └──────────┬───────────┘
-                                   │ per channel
-                        ┌──────────▼───────────┐
-                        │     NewsEngine        │
-                        │  (core/engine.js)     │
-                        └──────────┬───────────┘
-                                   │
-           ┌───────────┬───────────┼───────────┬────────────┐
-           ▼           ▼           ▼           ▼            ▼
-      ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
-      │ Sources │ │  Cache  │ │Middleware│ │   AI    │ │ Outputs │
-      └─────────┘ └─────────┘ └─────────┘ └─────────┘ └─────────┘
+```text
+Node CLI / Dashboard / Cloudflare Worker
+  -> channel definitions
+  -> NewsEngine
+  -> DeliveryStateMachine
+  -> delivery store
+  -> output plugins
 ```
 
-## Pipeline Flow
+The runtime entry points are:
 
-Each engine run follows this sequence:
+- `src/adapters/node.js` for manual runs, cron, preview, and local recovery controls
+- `src/adapters/cloudflare.js` for Worker routing and per-channel coordinator requests
+- `src/dashboard/server.js` for the authenticated dashboard runtime
 
-```
-1. Check cache → already sent today? → skip
-2. _fetchAll() → parallel fetch from all sources (batched by concurrency, 500ms delay)
-3. _dedup() → filter already-sent articles via cache
-4. Middlewares → user-injected transforms:
-   ├── createScoringMiddleware() → score & rank by engagement/recency/credibility
-   ├── createSemanticDedupMiddleware() → remove cross-source duplicates (bigram similarity)
-   └── custom (articles) => articles transforms
-5. ai.summarize() → with audience context, grouped articles, platform rules
-6. output.send() → parallel to all outputs (auto-truncate to maxLength)
-7. _markSent() → cache article IDs
-```
+## Core Pipeline
 
-### Drip Mode (Alternative)
+1. Fetch all sources in bounded batches.
+2. Collect source diagnostics and classify failures separately from empty feeds.
+3. Deduplicate against delivery state and legacy compatibility data.
+4. Apply middlewares such as scoring and semantic dedup.
+5. Summarize with AI.
+6. Claim one output at a time in configured topology order.
+7. Commit each output result durably before the next output attempt starts.
+8. Mark article and maintenance state only after successful completion.
 
-Instead of sending all articles at once, drip mode sends `batchSize` articles per cron run:
+The pipeline never claims exactly-once delivery. It provides bounded, operator-assisted recovery.
 
-```
-1. Fetch → Dedup → Score/Rank (same as above)
-2. Take first `batchSize` unsent articles
-3. Summarize batch only
-4. Send → Mark sent
-5. Remaining articles wait for next cron trigger
-```
+## Delivery State Model
 
-## Plugin System
+### Cloudflare
 
-### Contracts (core/contracts.js)
+Cloudflare delivery uses one SQLite-backed Durable Object per channel:
 
-Four abstract base classes define the plugin interfaces:
+- `ChannelDeliveryCoordinator` owns request acceptance and recovery
+- `SQLiteDeliveryStore` persists requests, deliveries, attempts, outputs, batches, reservations, maintenance rows, and operator actions in physical per-domain tables
+- alarms are created only after accepted/claimed durable work exists, preserve an earlier wakeup, and repair stalled deadlines without authorizing a second live attempt
+- request and operator mutations are idempotent and versioned
+- `news_schema_migrations` records additive application migrations; schema v6 migrates legacy generic rows, materializes hot query fields, and adds exact indexes for retention, status, queue, and repair-alarm queries
 
-| Contract | Key Method | Returns |
-|----------|-----------|---------|
-| `SourcePlugin` | `fetch(options)` | `Article[]` |
-| `AIPlugin` | `summarize(articles, options)` | `{ text, usage?, model? }` |
-| `OutputPlugin` | `send(content, options)` | `{ success, messageId?, error? }` |
-| `CachePlugin` | `get(key)`, `set(key, value, ttl)` | cache operations |
+### Local Node and Dashboard
 
-Engine validates plugin types at registration time (`instanceof` check).
+Local runtimes use `LocalFileDeliveryStore`:
 
-### Article Schema
+- one owned local state file
+- atomically published unique-owner lock plus a canonical compatibility link to prevent multiple writers
+- process identity includes the process start instant when the platform exposes it, preventing a reused PID from inheriting a stale writer lock
+- stale legacy canonical-lock conversion requires every older runtime sharing the file to be stopped and drained before the upgrade starts
+- a failed atomic save reloads the renamed durable snapshot or quarantines the store instead of allowing memory and disk to diverge
+- read-only initialization for preview paths
+- synchronous transactions only
 
-All source plugins return articles in this unified schema:
+`MemoryDeliveryStore` exists for tests and ephemeral inspection, not for real output paths.
 
-```
-{ id, title, url, content, source, category?, author?, publishedAt?, imageUrl?, meta? }
-```
+## State Tables
 
-## Multi-Channel Architecture
+| Table | Purpose |
+|---|---|
+| `channel_state` | Per-channel pause and mutation lease |
+| `requests` | Accepted trigger/operator requests |
+| `deliveries` | High-level delivery lifecycle |
+| `attempts` | Generation and output attempts |
+| `delivery_outputs` | Per-output result state |
+| `articles` | Article ownership and terminal status |
+| `delivery_reservations` | Digest request reservation and recovery |
+| `day_batches` | Drip queue state and refill tracking |
+| `batch_items` | Drip queue item order |
+| `maintenance_outbox` | Legacy compatibility and token-maintenance replay |
+| `operator_actions` | Idempotent operator audit records |
+| `legacy_seen_compat` / `legacy_digest_compat` | Read-only legacy dedup compatibility |
+| `coordinator_meta` | Immutable channel identity and durable last-request pointer |
+| `canary_state` / `migration_state` | Canary evidence and legacy-import commit marker |
+| `retention_state` | Once-per-day compaction marker |
+| `news_schema_migrations` | Additive SQLite migration ledger |
 
-The channel system (`src/channels/`) allows running multiple independent engine instances, each with its own schedule, sources, AI config, output, and prompt style.
+Known runtime domains map to their own physical SQLite tables. `delivery_records` remains as a bounded compatibility table for migrating older generic rows and for non-domain test records; normal coordinator hot paths do not scan it. Store queries allowlisted materialized fields, cap individual pages at 1,000 rows, and use table-specific state/deadline/request/retention indexes. Aggregate status counts indexed state groups and reads only its requested page; the latest-batch summary is an indexed SQL aggregate rather than a capped item scan.
 
-```
-defineChannels(env)
-  │
-  ├── telegram-main   (drip mode, 3x/day, vi, digest, general IT audience)
-  ├── x-tech-vn       (drip mode, 3x/day, vi, digest)
-  ├── fb-ai-vn        (drip mode, 3x/day, vi, digest)
-  └── threads-dev-vn  (drip mode, 2x/day, vi, digest)
-```
+## Retention And Idempotency
 
-Each channel:
-- Gets a **PrefixedCache** (`news:{channelId}:*`) for isolated dedup state
-- Has independent cron schedule checked by `shouldRun(cronExpr, now)`
-- Runs sequentially to avoid resource contention
-- Uses **platform-specific prompt rules** via `platform-rules.js`
+- unresolved deliveries, attempts, requests, and referenced operator actions do not expire by age
+- ordinary bulky terminal delivery data is removed after 30 days
+- force/canary delivery records become compact replayable tombstones after 30 days
+- ordinary completed request detail is removed after 90 days; force/canary/operator-retry requests become compact tombstones
+- operator reasons are hashed before persistence; audit results contain bounded IDs/state only and become compact tombstones after 365 days
+- permanent article dedup, safety suppression, and mutation-idempotency tombstones are independent of bulky-history retention
 
-### Channel Activation
+## Run Modes
 
-Channels activate automatically when their required env vars are present:
-- Telegram: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
-- X/Twitter: `X_CLIENT_ID` + `TOKEN_ENCRYPTION_KEY` + KV namespace
-- Facebook: `FB_PAGE_TOKEN` + `FB_PAGE_ID`
-- Threads: `THREADS_USER_ID` + `TOKEN_ENCRYPTION_KEY` + KV namespace
+| Mode | Behavior |
+|---|---|
+| `run` | Manual delivery run that bypasses cron gating |
+| `cron` / `daemon` | Exact per-channel schedule execution |
+| `preview` | Read-only delivery preview |
+| `pause` / `resume` | Versioned channel state change |
+| `retry-*` | Exact target recovery actions |
+| `restore-topology` | Audited, versioned release of one config-matched topology blocker |
 
-## Dashboard (Config-Driven)
+In Cloudflare:
 
-The dashboard (`src/dashboard/`) provides a web UI for monitoring and managing streams defined in `streams.config.json`.
+- `quiesced` blocks mutation and token maintenance
+- `bootstrap` permits health, status, queue, and operator pause only; preview is blocked because it performs source and AI provider I/O
+- `active` enables the full configured delivery surface
 
-```
-streams.config.json
-  │
-  ├── config-loader.js  → parse, resolve $ENV_VAR references
-  ├── scheduler.js      → node-cron job management
-  ├── stream-runner.js  → build & run engine per stream
-  └── server.js         → Express HTTP server
-       ├── GET /api/streams        → list streams + status
-       ├── POST /api/streams/:id/run → manual trigger
-       ├── GET /api/runs           → run history
-       └── GET /api/events         → SSE live updates
-```
+## Channel Scheduling
 
-## AI Prompt System
+`src/channels/definitions.js` builds channel configs from environment variables. `src/channels/runner.js` then executes due channels sequentially.
 
-`ai/_prompts.js` exports `buildPrompt()` and `buildHookPrompt()` which generate `{system, user}` prompt pairs:
+Important details:
 
-- **Language**: output is locked to Vietnamese with full diacritics (`vi`)
-- **Style**: `digest` / `hot_take` / `bullet` / `thread` / `newsletter` / `weekly` / `mustread`
-- **Audience**: injected into system prompt for tone calibration
-- **Platform**: platform-specific formatting rules appended (from `platform-rules.js`)
-- **Grouping**: articles auto-grouped by category when mixed categories detected
-- **Vietnamese voice**: tuned for natural Vietnglish editorial output with a balanced IT-industry perspective
-- **Vietnamese output rule**: generated content must be Vietnamese with full diacritics; English is allowed only for technical terms, product names, acronyms, code identifiers, URLs, and hashtags
-- **Source-data guardrail**: article title/content/metadata are treated as untrusted data, not instructions
-
-## Deployment Targets
-
-| Target | Adapter | Cache | Notes |
-|--------|---------|-------|-------|
-| Cloudflare Workers | `adapters/cloudflare.js` | CloudflareKVCache | Cron trigger + HTTP endpoints |
-| Node.js (VPS/Docker) | `adapters/node.js` | FileCache / RedisCache | CLI: run / cron / preview |
-| Dashboard (Node.js) | `dashboard/server.js` | FileCache | Express + SSE, config-driven |
-| Serverless (Lambda/Vercel) | Custom | MemoryCache | Wrap `engine.run()` in handler |
+- `BROADCAST_MODE` controls `digest` vs `drip`
+- `CRON_SCHEDULE` and the per-channel cron overrides are exact five-field expressions
+- source fetches are batched, but channel execution is sequential
+- drip mode can carry unresolved work across days and can refill once when source health allows
 
 ## Security Model
 
-- All credentials externalized to environment variables
-- OAuth tokens (X, Threads) stored encrypted in Cloudflare KV via `KVTokenStore`
-- `TRIGGER_SECRET` guards manual trigger endpoints on Cloudflare Workers
-- No secrets in source code or git history
-- Platform tokens use provider-recommended auth flows (System User tokens for Facebook, OAuth 2.0 for X/Threads)
+### Cloudflare Worker
 
-## Presets
+- `TRIGGER_SECRET` protects trigger, status, queue, and preview routes
+- `OPERATOR_SECRET` protects force and recovery routes
+- `OPERATOR_KEY_ID` is required for audit identity
+- `Idempotency-Key` is required for manual and operator mutations
+- `NEWS_RUNTIME_MODE` and `TOKEN_MAINTENANCE_MODE` control runtime exposure
+- X output topology additionally requires `X_DESTINATION_ID`, a stable non-secret authenticated account identity
 
-Pre-configured source bundles in `src/presets/index.js` simplify common use cases:
+Aggregate `/status` exposes only redacted runtime mode, channel pause/version, durable last request, source warning, queue/unresolved counts, and paginated request/target projections. Exact request status and aggregate status both repair recovery alarms in active mode.
 
-| Preset | Sources | Use Case |
-|--------|---------|----------|
-| `bigTechBlogs()` | 15 RSS sources | Engineering blogs from Uber, Meta, Netflix, AWS, Cloudflare, GitHub, Google, Stripe, Airbnb, LinkedIn, Spotify, Dropbox, Shopify, Vercel, Mozilla |
-| `communitySources()` | 5 sources | Hacker News, Reddit (programming, ExperiencedDevs), Dev.to, GitHub Trending |
-| `aiMLBlogs()` | 5 sources | OpenAI, DeepMind, Hugging Face RSS + Reddit (MachineLearning), Hacker News (AI/LLM) |
-| `aiNewsSources()` | 8 sources | Daily AI industry news: TechCrunch, The Verge, Ars Technica, VentureBeat + Reddit (LocalLLaMA, singularity, artificial) + Hacker News AI query |
-| `aiDeepDiveSources()` | 6 sources | Weekly technical deep-dives: Simon Willison, Lilian Weng, Latent Space, Ahead of AI, One Useful Thing, Import AI |
-| `devopsSources()` | 4 sources | DevOps: Cloudflare, HashiCorp RSS + Reddit (devops), Dev.to (devops tag) |
-| `mobileSources()` | 4 sources | Mobile: Android Developers, Swift.org RSS + Reddit (androiddev, iOSProgramming) |
+### Dashboard
 
-Each preset returns a `SourcePlugin[]` array, spread into `.addSource()` when building an engine or stream.
+- Basic auth uses separate trigger and operator credentials
+- loopback is the default bind target
+- non-loopback startup requires explicit HTTPS/origin/proxy policy
+- responses are redacted and set `Cache-Control: no-store`
 
-## Data Flow Summary
+## Delivery Guarantees
 
-```
-[RSS/HN/Reddit/Dev.to/GitHub] → fetch → Article[]
-  → cache dedup → scoring middleware → semantic dedup middleware
-  → AI summarize (Vietnamese with diacritics + platform rules + audience)
-  → output.send() to [Telegram/X/Facebook/Threads/Slack/Discord/...]
-  → cache mark sent
-```
+- source failures are diagnostic, not silent
+- AI generation is required before output delivery
+- outputs are sequential with durable acknowledgement between calls
+- stale attempts become recoverable states rather than disappearing
+- ambiguous output is not automatically resent
+- matching output configuration never auto-clears `blocked_topology`; an operator must invoke `restore-topology` or `abandon`
+- paused channels do not accept new claims unless an audited paused-mutation override is supplied
+- legacy compatibility replay is separate from authoritative delivery commits
+
+## Rollout Stages
+
+The recovery plan is intentionally staged:
+
+1. quiesce old writers
+2. validate a no-mutation Worker bundle
+3. deploy the lifecycle/bootstrap bundle
+4. keep every channel paused
+5. run a single approved canary
+6. resume only the approved channel
+
+This is a controlled promotion path, not a one-shot deploy.
+
+## Configuration Notes
+
+| File | Role |
+|---|---|
+| `wrangler.quiesce.toml` | Reversible pre-lifecycle Worker bundle |
+| `wrangler.toml` | Lifecycle/bootstrap Worker bundle |
+| `wrangler.test.toml` | Worker test bundle |
+
+Local and dashboard runtimes rely on:
+
+- `DELIVERY_STORE_TYPE=file`
+- `DELIVERY_STORE_PATH`
+- `CACHE_TYPE` and `CACHE_PATH`
+- `DASHBOARD_*` auth/origin/TLS/proxy settings
+
+## Operational Boundaries
+
+- Do not treat `MemoryCache` as a delivery store.
+- Do not document exactly-once delivery.
+- Do not claim parallel output sending.
+- Do not route output-capable commands through a non-persistent cache.
+- Do not merge rollout and recovery logic into source or output plugins.

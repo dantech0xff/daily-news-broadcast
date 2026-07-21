@@ -1,65 +1,85 @@
-# 🔥 NewsEngine — Portable Tech News Aggregator
+# NewsEngine
 
-Plugin-based news aggregation engine. Fetch from any source, summarize with any AI, send to any channel.
+Plugin-based news aggregation engine. It fetches articles from any source, summarizes them with any AI provider, and sends the result to any output channel.
 
-**Zero lock-in.** Swap sources, AI models, output channels with a single line of code.
+Current delivery model:
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                          NewsEngine                               │
-│                                                                  │
-│  ┌─ Sources ──────┐   ┌─ AI ────────┐   ┌─ Outputs ──────────┐ │
-│  │ RSS/Atom       │   │ Claude      │   │ Telegram           │ │
-│  │ HTML Scraper   │──▶│ OpenAI      │──▶│ X (Twitter)        │ │
-│  │ Hacker News    │   │ Groq        │   │ Facebook           │ │
-│  │ Reddit         │   │ Gemini      │   │ Threads            │ │
-│  │ Dev.to         │   │ Ollama      │   │ Slack / Discord    │ │
-│  │ GitHub Trending│   │ OpenRouter  │   │ Email / Webhook    │ │
-│  │ JSON API (any) │   │ Together    │   │ Markdown File      │ │
-│  │ [Your Plugin]  │   │ Qwen/DeepSk│   │ [Your Plugin]      │ │
-│  └────────────────┘   │ [Your own]  │   └────────────────────┘ │
-│                       └─────────────┘                            │
-│  ┌─ Cache ─────────┐  ┌─ Middleware ──────┐  ┌─ Channels ────┐ │
-│  │ Memory          │  │ Filter by keyword │  │ Multi-channel │ │
-│  │ File (JSON)     │  │ Semantic dedup    │  │ Per-channel   │ │
-│  │ Redis           │  │ Score & rank      │  │   schedule    │ │
-│  │ Cloudflare KV   │  │ [Your transform]  │  │ Drip / Digest │ │
-│  └─────────────────┘  └───────────────────┘  └───────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
-```
+- AI generation is required for any real delivery or preview run.
+- Output attempts are sequential, not parallel, and each durable acknowledgement is committed before the next output starts.
+- Delivery state is durable. The engine does not promise exactly-once delivery.
+- `MemoryCache` is for tests and dry-run paths only. Output-capable commands require a persistent cache and a durable delivery store.
 
 ## Quick Start
 
-### 1. Install
+### Install
 
 ```bash
 npm install
 cp .env.example .env
-# Edit .env with your tokens
 ```
 
-### 2. Run
+### Validate
 
 ```bash
-# One-time run
-node src/adapters/node.js run
-
-# Daemon mode with cron schedule
-node src/adapters/node.js cron
-
-# Preview (fetch + summarize, no send)
-node src/adapters/node.js preview
-
-# Deploy to Cloudflare Workers
-wrangler deploy
+npm test
 ```
 
-### 3. Or use as library
+### Run
+
+```bash
+npm run preview   # read-only preview, fetch + summarize, no send
+npm run start     # manual run
+npm run start:cron # exact per-channel cron daemon
+npm run dashboard # dashboard runtime
+```
+
+The Node runtime supports Node.js `>=18`. Development and Workers verification require Node.js `>=22` because the pinned Wrangler/Vitest toolchain requires it. The checked-in Cloudflare configs are staged artifacts:
+
+- `wrangler.test.toml` for local Worker tests
+- `wrangler.quiesce.toml` for the reversible no-mutation quiesce bundle
+- `wrangler.toml` for the lifecycle/bootstrap bundle with default pause
+
+## Runtime Modes
+
+| Command | Behavior | Notes |
+|---|---|---|
+| `run` | Manual run that bypasses cron gating | Not the same as force |
+| `drip` | Alias of `run` | Each channel keeps its configured mode |
+| `cron` | Exact per-channel cron daemon | Uses each channel timezone and schedule |
+| `daemon` | Alias of `cron` | Same behavior |
+| `preview` | Read-only preview | Mode-aware and non-mutating |
+| `pause` / `resume` | Operator recovery controls | Require exact version, idempotency key, and reason |
+| `retry-generation` / `retry-output` | Retry one exact unresolved item | Require exact target IDs and expected version |
+| `restore-topology` | Clear one topology blocker after configuration is restored | Versioned and audited; matching configuration alone never clears the blocker |
+| `confirm-delivered` / `abandon` | Resolve ambiguous or blocked items | Operator-only recovery actions |
+| `retry-maintenance` | Replay one dead-letter maintenance mirror | Replay stays separate from authoritative delivery commits |
+
+Force semantics are explicit:
+
+- CLI force is `node src/adapters/node.js run --force --channel <id> --idempotency-key <key> --confirm-duplicate-risk`
+- Worker force is operator-only and requires `Authorization: Bearer <OPERATOR_SECRET>`
+- Scheduled runs remain schedule-driven; force does not silently change cron semantics
+
+## Delivery Model
+
+- Sources fetch into a bounded article set, then middlewares can score or filter it.
+- AI summarizes the selected articles using the configured language, style, audience, and platform rules.
+- Outputs are processed one at a time in configured topology order.
+- After each output send, the state machine commits the result before the next output starts.
+- Failures become classified states such as retryable, manual-retry-required, ambiguous, or exhausted.
+- Drip mode persists a day batch, can carry unresolved items across days, and supports one bounded refill when source health allows it.
+- Legacy `seen:*` and digest compatibility data are read conservatively and preserved during migration.
+- Pausing blocks new claims. It does not cancel an external call that has already been issued.
+- Cloudflare hot paths use physical per-domain SQLite tables and indexed bounded queries; the generic record table is retained only for schema migration and non-domain compatibility.
+- Status reads count indexed recovery groups and fetch only the requested page. Queue summaries use one indexed aggregate, so neither path truncates after 1,000 records or performs one delivery read per batch item.
+- Bulky terminal delivery detail is pruned after 30 days, ordinary terminal request detail after 90 days, and operator audit detail is minimized/compacted while permanent idempotency and safety tombstones remain replayable.
+
+Before upgrading an existing local file store to the unique-owner lock protocol, stop and drain every older Node/dashboard process that can open the same store. The new runtime retains a canonical compatibility link while it owns the store, but converting a stale legacy canonical lock is intentionally a quiescence-only migration.
+
+## Library Example
 
 ```javascript
-import { NewsEngine, FileCache } from './src/core/index.js';
+import { NewsEngine, FileCache, LocalFileDeliveryStore } from './src/core/index.js';
 import { bigTechBlogs } from './src/presets/index.js';
 import { ClaudeAI } from './src/ai/index.js';
 import { TelegramOutput } from './src/outputs/index.js';
@@ -71,547 +91,126 @@ const engine = new NewsEngine()
     botToken: process.env.TELEGRAM_BOT_TOKEN,
     chatId: process.env.TELEGRAM_CHAT_ID,
   }))
-  .useCache(new FileCache())
-  .configure({ language: 'vi', style: 'digest' });
+  .useCache(new FileCache(process.env.CACHE_PATH))
+  .useDeliveryStore(new LocalFileDeliveryStore(process.env.DELIVERY_STORE_PATH))
+  .configure({
+    channelId: 'telegram-main',
+    language: 'vi',
+    style: 'digest',
+    platform: 'telegram',
+  });
 
 await engine.run();
 ```
 
-## Project Structure
+## Core Layout
 
-```
+```text
 src/
-├── core/                        # Engine core — platform agnostic
-│   ├── contracts.js             # 4 plugin interfaces: Source, AI, Output, Cache
-│   ├── engine.js                # Orchestrator (fluent builder, drip mode)
-│   ├── caches.js                # Memory, File, Cloudflare KV, Redis
-│   ├── prefixed-cache.js        # Namespaced cache wrapper per channel
-│   ├── scoring.js               # Engagement + recency + credibility scoring
-│   ├── semantic-dedup.js        # Bigram title similarity dedup
-│   ├── grouping.js              # Category grouping for structured prompts
-│   └── index.js                 # Barrel exports
-│
-├── sources/                     # Data source plugins
-│   ├── rss.js                   # RSS/Atom feed parser (zero deps)
-│   ├── html-scraper.js          # HTML scraper for blogs without RSS
-│   ├── hackernews.js            # Hacker News (Algolia API)
-│   ├── reddit.js                # Reddit (public JSON API)
-│   ├── devto.js                 # Dev.to API + generic JSONAPISource
-│   ├── github-trending.js       # GitHub Search API (popular repos)
-│   ├── og-image.js              # og:image enrichment utility
-│   └── index.js
-│
-├── ai/                          # AI summarization plugins
-│   ├── claude.js                # Anthropic Claude (native API)
-│   ├── openai-compat.js         # OpenAI-compatible: GPT, Groq, Gemini, Ollama, etc.
-│   ├── create-ai.js             # Shared factory: provider string → AIPlugin
-│   ├── platform-rules.js        # Platform-specific formatting rules
-│   ├── _prompts.js              # Shared prompt templates (7 styles)
-│   └── index.js
-│
-├── outputs/                     # Output channel plugins
-│   ├── telegram.js              # Telegram Bot API (auto-split, markdown fallback)
-│   ├── x.js                     # X/Twitter (OAuth 2.0, threaded tweets)
-│   ├── facebook.js              # Facebook Page (Graph API)
-│   ├── threads.js               # Threads (Meta, two-step publish)
-│   ├── channels.js              # Slack, Discord, Email, Webhook, Markdown file
-│   └── index.js
-│
-├── channels/                    # Multi-channel orchestration
-│   ├── definitions.js           # Channel definitions from env vars
-│   ├── runner.js                # Schedule matching + sequential execution
-│   └── index.js
-│
-├── utils/                       # Shared utilities
-│   └── token-store.js           # Encrypted KV token storage (OAuth tokens)
-│
-├── dashboard/                   # Web dashboard (Express)
-│   ├── server.js                # HTTP server + SSE + API routes
-│   ├── config-loader.js         # streams.config.json loader
-│   ├── scheduler.js             # Cron job manager
-│   ├── stream-runner.js         # Stream execution engine
-│   └── public/                  # Frontend SPA
-│
-├── presets/                     # Pre-configured source bundles
-│   └── index.js                 # bigTechBlogs(), communitySources(), aiMLBlogs(), etc.
-│
-├── adapters/                    # Runtime adapters
-│   ├── cloudflare.js            # Cloudflare Worker (cron + HTTP)
-│   └── node.js                  # Node.js CLI + daemon mode
-│
-├── Dockerfile
-├── docker-compose.yml
-├── wrangler.toml
-└── .env.example
+├── core/      Delivery contracts, state machine, caches, delivery store
+├── sources/   RSS, HTML scraper, Hacker News, Reddit, Dev.to, GitHub trending
+├── ai/        Claude + OpenAI-compatible providers and prompt builder
+├── outputs/   Telegram, X, Facebook, Threads, Slack, Discord, Email, webhook, file
+├── presets/   Source bundle factories
+├── channels/  Multi-channel definitions and scheduler
+├── dashboard/ Express dashboard and operator auth
+└── adapters/  Node CLI and Cloudflare Worker entry points
 ```
 
-## Plugin System
+## Recovery Commands
 
-### Contracts (Interfaces)
-
-Every plugin extends one of 4 base classes from `src/core/contracts.js`:
-
-| Contract | Methods | Purpose |
-|----------|---------|---------|
-| `SourcePlugin` | `.fetch(options)` → `Article[]` | Fetch articles from any source |
-| `AIPlugin` | `.summarize(articles, options)` → `SummaryResult` | Summarize with any AI model |
-| `OutputPlugin` | `.send(content, options)` → `SendResult` | Send results to any channel |
-| `CachePlugin` | `.get()` `.set()` `.has()` `.delete()` | Dedup & state management |
-
-### Article Schema
-
-All source plugins return articles in this unified schema:
-
-```javascript
-{
-  id: string,            // Unique ID (usually the URL)
-  title: string,         // Article title
-  url: string,           // Original link
-  content: string,       // Content / description (plain text)
-  source: string,        // Source name
-  category?: string,     // Category
-  author?: string,       // Author
-  publishedAt?: Date,    // Publication date
-  meta?: object,         // Arbitrary metadata (points, comments, icon, etc.)
-}
-```
-
-## Available Plugins
-
-### Sources
-
-| Plugin | Auth | Description |
-|--------|------|-------------|
-| `RSSSource` | ❌ | RSS/Atom feed — works for most blogs |
-| `HTMLScraperSource` | ❌ | HTML scraper — for blogs without RSS |
-| `HackerNewsSource` | ❌ | HN Algolia API — filter by points, query |
-| `RedditSource` | ❌ | Reddit JSON API — filter by subreddit, upvotes |
-| `DevToSource` | ❌ | Dev.to API — filter by tag, reactions |
-| `GitHubTrendingSource` | ❌ | GitHub Search API — trending repos by stars/language |
-| `JSONAPISource` | ⚙️ | Generic JSON API — custom transform function |
-
-### AI Providers
-
-| Plugin | Factory / Config | Description |
-|--------|-----------------|-------------|
-| `ClaudeAI` | `provider: 'claude'` | Anthropic Claude (native API) |
-| `OpenAICompatibleAI` | `provider: 'openai'` | OpenAI GPT models |
-| | `provider: 'groq'` | Groq (ultra-fast inference) |
-| | `provider: 'gemini'` | Google Gemini |
-| | `provider: 'qwen'` | Alibaba Qwen (DashScope) |
-| | `provider: 'deepseek'` | DeepSeek |
-| | `provider: 'ollama'` | Ollama (local, offline) |
-| | `provider: 'openrouter'` | OpenRouter (model marketplace) |
-| | `provider: 'together'` | Together AI |
-| | `provider: 'custom'` | Any OpenAI-compatible endpoint |
-
-Use `createAI({ provider, apiKey, model })` factory or set `AI_PROVIDER` env var.
-
-### Outputs
-
-| Plugin | Description |
-|--------|-------------|
-| `TelegramOutput` | Telegram Bot API (auto-split >4096 chars, markdown fallback) |
-| `XOutput` | X/Twitter (OAuth 2.0, threaded tweets, auto-split >280 chars) |
-| `FacebookOutput` | Facebook Page (Graph API, link preview support) |
-| `ThreadsOutput` | Threads by Meta (two-step publish, 500 char limit) |
-| `SlackOutput` | Slack Incoming Webhook |
-| `DiscordOutput` | Discord Webhook (auto-split >2000 chars) |
-| `EmailOutput` | Email via Resend or SendGrid |
-| `WebhookOutput` | Generic HTTP POST webhook |
-| `MarkdownFileOutput` | Save as `.md` file (for static sites, GitHub) |
-
-### Caches
-
-| Plugin | Persistence | Best for |
-|--------|-------------|----------|
-| `MemoryCache` | ❌ In-memory | Testing, serverless |
-| `FileCache` | ✅ JSON file | Local dev, Docker, VPS |
-| `RedisCache` | ✅ Redis | Production, multi-instance |
-| `CloudflareKVCache` | ✅ CF KV | Cloudflare Workers |
-
-### Presets (Source Bundles)
-
-| Preset | Sources | Description |
-|--------|---------|-------------|
-| `bigTechBlogs()` | 15 sources | Uber, Meta, Netflix, AWS, Cloudflare, etc. |
-| `communitySources()` | 5 sources | HN, r/programming, r/ExperiencedDevs, Dev.to, GitHub Trending |
-| `aiMLBlogs()` | 5 sources | OpenAI, DeepMind, HuggingFace, r/ML, HN AI |
-| `aiNewsSources()` | 8 sources | TechCrunch AI, Verge AI, Ars Technica, VentureBeat, r/LocalLLaMA, r/singularity, r/artificial, HN AI |
-| `aiDeepDiveSources()` | 6 sources | Simon Willison, Lilian Weng, Latent Space, Ahead of AI, One Useful Thing, Import AI |
-| `devopsSources()` | 4 sources | Cloudflare, HashiCorp, r/devops, Dev.to |
-| `mobileSources()` | 4 sources | Android Developers, r/androiddev, r/iOS, Dev.to |
-
-## Usage Examples
-
-### Minimal — 15 blogs → Claude → Telegram
-
-```javascript
-import { NewsEngine, FileCache } from './src/core/index.js';
-import { bigTechBlogs } from './src/presets/index.js';
-import { ClaudeAI } from './src/ai/index.js';
-import { TelegramOutput } from './src/outputs/index.js';
-
-const engine = new NewsEngine()
-  .addSource(...bigTechBlogs())
-  .useAI(new ClaudeAI({ apiKey: process.env.ANTHROPIC_API_KEY }))
-  .addOutput(new TelegramOutput({
-    botToken: process.env.TELEGRAM_BOT_TOKEN,
-    chatId: process.env.TELEGRAM_CHAT_ID,
-  }))
-  .useCache(new FileCache());
-
-await engine.run();
-```
-
-### Multi-output — send to Telegram + Slack + Discord in parallel
-
-```javascript
-engine
-  .addOutput(new TelegramOutput({ botToken: '...', chatId: '...' }))
-  .addOutput(new SlackOutput({ webhookUrl: 'https://hooks.slack.com/...' }))
-  .addOutput(new DiscordOutput({ webhookUrl: 'https://discord.com/api/webhooks/...' }));
-```
-
-### Swap AI — replace Claude with Groq (free, ultra-fast)
-
-```javascript
-import { groq } from './src/ai/index.js';
-
-engine.useAI(groq('gsk_...'));
-```
-
-### Swap AI — run offline with Ollama
-
-```javascript
-import { ollama } from './src/ai/index.js';
-
-engine.useAI(ollama('llama3.2'));
-```
-
-### Custom sources — mix presets + manual
-
-```javascript
-import { bigTechBlogs, communitySources } from './src/presets/index.js';
-import { RSSSource, RedditSource } from './src/sources/index.js';
-
-engine
-  .addSource(...bigTechBlogs())
-  .addSource(...communitySources())
-  .addSource(new RSSSource({
-    id: 'my-blog', name: 'My Company Blog',
-    feedUrl: 'https://blog.mycompany.com/feed.xml',
-    icon: '🏢', category: 'Internal',
-  }))
-  .addSource(new RedditSource({ subreddit: 'kotlin', minUpvotes: 30 }));
-```
-
-### Middleware — filter & transform articles before AI
-
-```javascript
-engine
-  // Keep only articles matching relevant keywords
-  .use(articles => articles.filter(a =>
-    /kubernetes|docker|terraform/i.test(a.title + a.content)
-  ))
-  // Custom scoring
-  .use(articles => articles.sort((a, b) =>
-    (b.meta?.points || 0) - (a.meta?.points || 0)
-  ).slice(0, 20));
-```
-
-### Newsletter style instead of digest
-
-```javascript
-engine.configure({ language: 'vi', style: 'newsletter' });
-// Styles: 'digest' | 'hot_take' | 'bullet' | 'thread' | 'newsletter' | 'weekly' | 'mustread'
-```
-
-### Multi-channel — broadcast to multiple platforms
-
-Use the `channels/` system to run multiple engine instances, each with its own schedule, prompt style, and output:
-
-```javascript
-import { defineChannels } from './src/channels/index.js';
-import { runChannels } from './src/channels/runner.js';
-
-const channels = defineChannels(process.env);
-await runChannels(channels, { cache, force: true });
-// Each channel has: id, schedule, mode (drip/digest), platform-specific prompt
-```
-
-Channels auto-activate when their required env vars are set. See `.env.example` for details.
-
-### Config-driven streams (JSON)
-
-Instead of code, define streams in `streams.config.json`:
-
-```json
-{
-  "streams": [{
-    "id": "morning-tech-digest",
-    "cron": "0 7 * * *",
-    "sources": [{ "type": "preset", "preset": "bigTechBlogs" }],
-    "ai": {
-      "provider": "claude",
-      "apiKey": "$ANTHROPIC_API_KEY",
-      "style": "digest",
-      "audience": "nguoi lam IT Viet Nam: developers, engineers, product, data, security, operations, technical leaders",
-      "platform": "telegram"
-    },
-    "outputs": [{ "type": "telegram", "config": { "botToken": "$TELEGRAM_BOT_TOKEN", "chatId": "$TELEGRAM_CHAT_ID" } }]
-  }]
-}
-```
-
-Run the dashboard to manage streams:
+Exact local recovery commands use the same CLI and must include a stable idempotency key, an expected version, and a bounded reason:
 
 ```bash
-npm run dashboard
-# http://localhost:3000 — monitor, manual trigger, SSE live updates
+node src/adapters/node.js pause \
+  --channel telegram-main \
+  --idempotency-key pause-telegram-main-001 \
+  --expected-version 7 \
+  --reason "Pause for recovery"
+
+node src/adapters/node.js resume \
+  --channel telegram-main \
+  --idempotency-key resume-telegram-main-001 \
+  --expected-version 8 \
+  --reason "Resume after recovery"
+
+node src/adapters/node.js retry-generation \
+  --channel telegram-main \
+  --idempotency-key retry-generation-001 \
+  --expected-version 12 \
+  --delivery-id <delivery-id> \
+  --reason "Retry generation after timeout"
+
+node src/adapters/node.js retry-output \
+  --channel telegram-main \
+  --idempotency-key retry-output-001 \
+  --expected-version 12 \
+  --delivery-id <delivery-id> \
+  --output-key <output-key> \
+  --reason "Retry output after ambiguous result"
 ```
 
-### Dry run — preview without sending
+`confirm-delivered`, `abandon`, and `retry-maintenance` follow the same pattern and require the exact target id plus the expected version.
 
-```javascript
-const result = await engine.run({ dryRun: true });
-console.log(result.content); // View digest content
-console.log(result.stats);   // { sources: 15, articles: 23, ... }
-```
+`restore-topology` additionally verifies that the current configured destination fingerprint matches the delivery's durable fingerprint. A config match is read-only until this explicit operator action commits; it never auto-unblocks or calls a provider.
 
-## Writing Custom Plugins
+## Cloudflare Runtime
 
-### Custom Source
+`src/adapters/cloudflare.js` routes requests through a per-channel Durable Object coordinator. The runtime modes are:
 
-```javascript
-import { SourcePlugin } from './src/core/contracts.js';
+| Mode | Behavior |
+|---|---|
+| `quiesced` | No delivery mutations, no token maintenance, no coordinator access |
+| `bootstrap` | Health/status/queue plus operator pause only; preview and provider work remain blocked |
+| `active` | Full configured delivery and recovery surface |
 
-class NotionSource extends SourcePlugin {
-  constructor(config) {
-    super();
-    this._config = config;
-  }
+Protected HTTP routes use separate trigger and operator secrets:
 
-  get id() { return 'notion'; }
-  get name() { return 'Notion Database'; }
-  get icon() { return '📓'; }
+- `TRIGGER_SECRET` authorizes trigger/status/queue/preview routes
+- `OPERATOR_SECRET` authorizes force/canary and recovery control routes
+- `OPERATOR_KEY_ID` is required for audit identity
+- `Idempotency-Key` is required for manual and operator mutations
+- accepted trigger, force, canary, and generation/output retry responses include a request ID and directly pollable `/status` link
+- generation/output retry endpoints atomically claim and persist the exact stage before returning `202`; provider work continues under the coordinator event, while alarms repair only durable claimed work
 
-  async fetch(options = {}) {
-    const { limit = 10 } = options;
-    const res = await fetch(`https://api.notion.com/v1/databases/${this._config.databaseId}/query`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this._config.apiKey}`,
-        'Notion-Version': '2022-06-28',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ page_size: limit }),
-    });
-    const data = await res.json();
-    return data.results.map(page => ({
-      id: page.id,
-      title: page.properties.Name?.title?.[0]?.plain_text || '',
-      url: page.url,
-      content: '',
-      source: this.name,
-    }));
-  }
-}
-```
+Aggregate status includes the runtime/pause state, durable last-request pointer, source degradation warning, queue counts, unresolved counts, and paginated redacted requests. Request-specific status also repairs a missing recovery alarm in active mode.
 
-### Custom AI Provider
+## Dashboard
 
-```javascript
-import { AIPlugin } from './src/core/contracts.js';
-import { buildPrompt } from './src/ai/_prompts.js';
+The dashboard starts with persistent storage and Basic auth. It defaults to loopback binding and refuses unsafe non-loopback startup unless the TLS and proxy policy is explicit.
 
-class MyLocalAI extends AIPlugin {
-  get id() { return 'local-ai'; }
-  get name() { return 'My Local Model'; }
-
-  async summarize(articles, options = {}) {
-    const prompt = buildPrompt(articles, options);
-    const res = await fetch('http://localhost:8080/v1/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: `${prompt.system}\n\n${prompt.user}`, max_tokens: 4096 }),
-    });
-    const data = await res.json();
-    return { text: data.choices[0].text, model: 'local' };
-  }
-}
-```
-
-### Custom Output
-
-```javascript
-import { OutputPlugin } from './src/core/contracts.js';
-
-class ZaloOutput extends OutputPlugin {
-  get id() { return 'zalo'; }
-  get name() { return 'Zalo OA'; }
-  get maxLength() { return 2000; }
-
-  async send(content) {
-    const res = await fetch('https://openapi.zalo.me/v3.0/oa/message/cs', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'access_token': this._config.accessToken,
-      },
-      body: JSON.stringify({
-        recipient: { user_id: this._config.userId },
-        message: { text: content },
-      }),
-    });
-    return { success: res.ok };
-  }
-}
-```
+- trigger and operator credentials are separate
+- responses are redacted and sent with `Cache-Control: no-store`
+- same-origin checks guard mutations
+- local preview stays read-only
 
 ## Testing
 
-### Quick test — preview mode (no sending)
-
 ```bash
-# Preview first channel (fetch + summarize, no send)
-node src/adapters/node.js preview
-
-# Preview specific channel
-node src/adapters/node.js preview --channel telegram-main
-
-# Force skip dedup cache
-node src/adapters/node.js run --force
+npm run test:node
+npm run test:workers
+npm test
+node --check src/core/engine.js
+node --check src/adapters/node.js
 ```
 
-### Test individual presets
+## Environment Overview
 
-```bash
-# Fetch articles from any preset
-node -e "
-import { aiNewsSources } from './src/presets/index.js';
-for (const src of aiNewsSources()) {
-  const articles = await src.fetch({ limit: 2 });
-  console.log(src.name, '—', articles.length, 'articles');
-}
-"
-```
+See `.env.example` for the full list. The important groups are:
 
-### Dashboard (config-driven streams)
-
-```bash
-npm run dashboard
-# http://localhost:3000 — monitor streams, manual trigger, live logs
-```
-
-### Cloudflare Workers dev
-
-```bash
-npx wrangler dev
-# curl http://localhost:8787/preview
-```
-
-## Deployment Options
-
-### Node.js (any VPS / Railway / Render / Fly.io)
-
-```bash
-node src/adapters/node.js cron
-```
-
-### Docker
-
-```bash
-docker compose up -d
-```
-
-### Cloudflare Workers
-
-```bash
-wrangler secret put TELEGRAM_BOT_TOKEN
-wrangler secret put TELEGRAM_CHAT_ID
-wrangler secret put GEMINI_API_KEY
-wrangler deploy
-```
-
-### AWS Lambda / Vercel / any serverless
-
-```javascript
-import { NewsEngine, MemoryCache } from './src/core/index.js';
-// ... setup engine
-export const handler = async () => engine.run();
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `AI_PROVIDER` | ❌ | `claude`/`openai`/`groq`/`gemini`/`qwen`/`deepseek`/`ollama`/`openrouter`/`together`/`custom`/`none` |
-| `AI_MODEL` | ❌ | Override default model for chosen provider |
-| `ANTHROPIC_API_KEY` | Per AI | Claude API key |
-| `OPENAI_API_KEY` | Per AI | OpenAI API key |
-| `GROQ_API_KEY` | Per AI | Groq API key |
-| `GEMINI_API_KEY` | Per AI | Google Gemini API key |
-| `QWEN_API_KEY` | Per AI | Alibaba DashScope API key |
-| `DEEPSEEK_API_KEY` | Per AI | DeepSeek API key |
-| `TELEGRAM_BOT_TOKEN` | Per output | Telegram bot token |
-| `TELEGRAM_CHAT_ID` | Per output | Telegram chat/channel ID |
-| `X_CLIENT_ID` | Per output | X/Twitter OAuth 2.0 client ID |
-| `FB_PAGE_TOKEN` | Per output | Facebook Page access token |
-| `FB_PAGE_ID` | Per output | Facebook Page ID |
-| `THREADS_USER_ID` | Per output | Threads user ID |
-| `TOKEN_ENCRYPTION_KEY` | Per output | Encryption key for OAuth tokens in KV |
-| `CACHE_TYPE` | ❌ | `file` / `redis` / `memory` (default: `file`) |
-| `CACHE_PATH` | ❌ | File cache path (default: `.cache/news.json`) |
-| `REDIS_URL` | ❌ | Redis connection URL |
-| `CRON_SCHEDULE` | ❌ | Cron expression (default: `0 7 * * *` = 14:00 VN) |
-| `SUMMARY_LANGUAGE` | ❌ | Output is locked to Vietnamese with diacritics (`vi`) |
-| `MAX_ARTICLES_PER_SOURCE` | ❌ | Default: `3` |
-| `CONCURRENCY_LIMIT` | ❌ | Parallel fetch limit (default: `5`) |
-| `DRIP_BATCH_SIZE` | ❌ | Articles per drip run (default: `5`) |
-| `DRIP_DELAY_MS` | ❌ | Delay between drip articles in ms |
-| `TRIGGER_SECRET` | ❌ | Auth secret for Cloudflare manual trigger |
-
-### Engine Options
-
-```javascript
-engine.configure({
-  concurrency: 5,              // Parallel source fetch
-  maxArticlesPerSource: 5,     // Max articles per source
-  language: 'vi',              // Output is always Vietnamese with diacritics
-  style: 'digest',             // digest | hot_take | bullet | thread | newsletter | weekly | mustread
-  audience: 'IT professionals',  // Target audience context for AI
-  platform: 'telegram',       // Platform-specific formatting rules
-  since: new Date('2025-01-01'), // Only articles after this date
-});
-```
-
-## Cost Estimate
-
-| Component | Cost |
-|-----------|------|
-| Claude API (Sonnet) | ~$0.003–0.01 / digest |
-| Groq (free tier) | $0 (rate limited) |
-| Ollama (local) | $0 (your hardware) |
-| Cloudflare Worker | Free tier (100k req/day) |
-| Telegram Bot API | Free |
+- AI provider selection and API keys
+- Telegram and optional multi-output credentials
+- `X_DESTINATION_ID`, a stable non-secret authenticated X account identity used in delivery topology keys
+- cache and delivery-store paths
+- Cloudflare runtime mode and secrets
+- dashboard auth, origin, TLS, and proxy controls
+- drip batch sizing and timeout tuning
 
 ## Dependencies
 
-### Required
-- `node-cron` — cron scheduling for Node.js adapter daemon mode
-- `express` — dashboard web server
+- `node-cron` for the Node cron daemon
+- `express` for the dashboard server
+- `dotenv` optional for local `.env` loading
+- `redis` optional for `RedisCache`
 
-### Optional
-- `dotenv` — .env file loading
-- `redis` — only if using RedisCache
-- `wrangler` — only for Cloudflare Workers deployment
-
-### Zero deps for core
-The core engine, all source parsers, AI clients, and output senders use only `fetch()` (native in Node 18+, CF Workers, Bun, Deno).
-
-## License
-
-[MIT](LICENSE)
+The core engine, parsers, AI clients, and outputs use native `fetch()` only.
