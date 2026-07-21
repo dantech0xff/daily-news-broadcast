@@ -31,7 +31,7 @@ test('final config declares SQLite coordinator in bootstrap and paused mode', ()
   assert.match(production, /NEWS_RUNTIME_MODE\s*=\s*"bootstrap"/);
   assert.match(production, /NEWS_DEFAULT_PAUSED\s*=\s*"true"/);
   assert.match(production, /TOKEN_MAINTENANCE_MODE\s*=\s*"disabled"/);
-  assert.equal(setting(production, 'BUILD_VERSION'), '"delivery-v2-20260721-1f8a755"');
+  assert.equal(setting(production, 'BUILD_VERSION'), '"delivery-v2-20260721-ff308d5"');
 });
 
 test('active-paused config changes only the runtime gate from the bootstrap artifact', () => {
