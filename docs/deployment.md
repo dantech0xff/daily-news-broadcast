@@ -4,26 +4,38 @@
 
 Production URL: <https://news-engine.dan-tran.workers.dev>
 
-The Worker is promoted in stages. The currently deployed pre-lifecycle stage is `quiesced`: health remains available, while scheduled delivery, manual mutations, token refresh, provider calls, and coordinator access are disabled.
+The Worker is promoted in stages. Production is currently on the post-lifecycle `active` runtime with the Telegram coordinator durably paused. The SQLite Durable Object lifecycle and legacy KV import are complete; scheduled delivery remains blocked by the durable pause, and token maintenance remains disabled until separately approved.
+
+Current verified state (2026-07-21):
+
+- Build: `delivery-v2-20260721-1f8a755`
+- Active Worker version: `27656c98-68d1-4dd9-9612-d92e0bbdbc27` at 100% traffic
+- Runtime: `active`
+- Channel: `telegram-main`, `paused=true`, `mutationState=free`, version `4`
+- Legacy import: 113 keys accounted for, 14 queue items imported, source KV retained
+- Telegram canary: one article and one output completed successfully
+- Token maintenance: disabled
 
 ## Deploy Commands
 
-Validate the reversible quiesce artifact:
+Validate the post-lifecycle bootstrap and active-paused artifacts:
 
 ```bash
-WRANGLER_LOG_PATH=/tmp/news-engine-quiesce-dry-run.log \
-  npx wrangler deploy --dry-run --config wrangler.quiesce.toml
+WRANGLER_LOG_PATH=/tmp/news-engine-bootstrap-dry-run.log \
+  npx wrangler deploy --dry-run --config wrangler.toml
+WRANGLER_LOG_PATH=/tmp/news-engine-active-paused-dry-run.log \
+  npx wrangler deploy --dry-run --config wrangler.active-paused.toml
 ```
 
-Deploy the reversible pre-lifecycle artifact:
+Deploy active code without resuming the durable channel:
 
 ```bash
-WRANGLER_LOG_PATH=/tmp/news-engine-quiesce-deploy.log \
-  npx wrangler deploy --config wrangler.quiesce.toml --strict \
-  --message "quiesce before durable delivery migration"
+WRANGLER_LOG_PATH=/tmp/news-engine-active-paused-deploy.log \
+  npx wrangler deploy --config wrangler.active-paused.toml --strict \
+  --message "deploy active runtime while delivery remains paused"
 ```
 
-Do not deploy `wrangler.toml` until the separate Durable Object lifecycle approval and pre-deploy archive/checksum gate are complete. Telegram canary and channel resume are later, independent approvals.
+`wrangler.toml` is now the post-lifecycle bootstrap boundary. Do not use `wrangler.quiesce.toml` or any pre-lifecycle Worker version as a rollback target. Channel resume remains a separate operator mutation and was not performed during the canary rollout.
 
 ## Environment Variables
 
@@ -49,19 +61,21 @@ No custom domain is configured. The deployment uses the account's `workers.dev` 
 ```bash
 curl --fail-with-body --silent --show-error \
   https://news-engine.dan-tran.workers.dev/health
-npx wrangler deployments status --config wrangler.quiesce.toml --json
+npx wrangler deployments status --config wrangler.toml --json
 ```
 
-For the quiesce stage, `/health` must report `status: "ok"` and `runtimeMode: "quiesced"`.
+`/health` must report `status: "ok"`, `runtimeMode: "active"`, and build `delivery-v2-20260721-1f8a755`. Protected status must report `paused=true`, `mutationState=free`, and zero ambiguous outputs, maintenance dead letters, and unresolved targets.
+
+The approved canary request is `711970696f57497e948441831451f94eea1ea004ba8fcd4ef3a29f1b64c80a59`. Its terminal evidence is `completed/success`, delivery `30a1346a6862c7a2681b90828b52549d6df0875f1329592a8151c7a5a88eb20b`, with `articles=1` and `outputs=1`. Confirmation was read-only; no second canary POST was issued.
 
 ## Rollback
 
-Before the Durable Object lifecycle begins, roll back only to the captured quiesce version:
+The verified post-lifecycle bootstrap rollback version is `0ccd198e-4f99-49dd-8aa1-1c2fcadfce4b`. It contains the same build identity, SQLite `ChannelDeliveryCoordinator` namespace, paused defaults, and disabled token maintenance:
 
 ```bash
-npx wrangler rollback <quiesce-version-id> \
-  --config wrangler.quiesce.toml \
-  --message "restore verified pre-lifecycle quiesce"
+npx wrangler rollback 0ccd198e-4f99-49dd-8aa1-1c2fcadfce4b \
+  --config wrangler.toml --yes \
+  --message "restore verified post-lifecycle bootstrap boundary"
 ```
 
-After the Durable Object class is created, pre-lifecycle versions are no longer valid rollback targets. Use only the captured full-schema bootstrap version or redeploy its checksum-verified immutable artifact.
+Never roll back to a version from before the Durable Object class creation. If the captured bootstrap version is unavailable, stop and fix forward from the checksum-verified post-lifecycle artifact; do not rebuild an emergency rollback from a dirty working tree.
