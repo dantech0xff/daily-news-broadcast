@@ -359,7 +359,7 @@ export class ChannelDeliveryCoordinator extends DurableObject {
   }
 
   async getQueue({ channelId, publishingDay, limit = 50, cursor = 0 } = {}) {
-    requireActiveRuntime(this.env);
+    requireReadableRuntime(this.env);
     await this._ensureIdentity(channelId);
     const engine = this._buildEngine(this._findChannel(channelId));
     const queue = await engine.getQueue({ publishingDay });
@@ -890,11 +890,25 @@ export class ChannelDeliveryCoordinator extends DurableObject {
       fingerprint,
       importedAt: now,
     });
-    return this.store.transact(tx => {
+    const transactionResult = await this.store.transact(tx => {
+      const replay = tx.get('operator_actions', operatorActionId);
+      if (replay) {
+        if (replay.payloadFingerprint !== payloadFingerprint) {
+          throw new Error('Idempotency key conflicts with a different operator action');
+        }
+        return { result: projectMigrationResult(replay.result) };
+      }
       const existing = tx.get('migration_state', migrationId);
       if (existing) {
         if (existing.sourceFingerprint !== fingerprint) throw new Error('Legacy migration fingerprint changed');
         if (existing.destinationFingerprint !== topology.fingerprint) throw new Error('Legacy destination fingerprint changed');
+        const currentChannel = tx.get('channel_state', action.channelId);
+        if (!currentChannel?.paused) {
+          return { migrationGuardError: 'Legacy migration requires a paused coordinator' };
+        }
+        if (currentChannel.version !== action.expectedVersion) {
+          return { migrationGuardError: 'Legacy migration version conflict' };
+        }
         const result = projectMigrationResult(existing);
         putMigrationOperatorAction(tx, {
           action,
@@ -905,11 +919,15 @@ export class ChannelDeliveryCoordinator extends DurableObject {
           result,
           now,
         });
-        return result;
+        return { result };
       }
       const currentChannel = tx.get('channel_state', action.channelId);
-      if (!currentChannel?.paused) throw new Error('Legacy migration requires a paused coordinator');
-      if (currentChannel.version !== action.expectedVersion) throw new Error('Legacy migration version conflict');
+      if (!currentChannel?.paused) {
+        return { migrationGuardError: 'Legacy migration requires a paused coordinator' };
+      }
+      if (currentChannel.version !== action.expectedVersion) {
+        return { migrationGuardError: 'Legacy migration version conflict' };
+      }
 
       for (const seen of prepared.seen) {
         if (!tx.get('legacy_seen_compat', seen.compatId)) {
@@ -1086,8 +1104,10 @@ export class ChannelDeliveryCoordinator extends DurableObject {
         result,
         now,
       });
-      return result;
+      return { result };
     });
+    if (transactionResult.migrationGuardError) throw new Error(transactionResult.migrationGuardError);
+    return transactionResult.result;
   }
 
   async _assertMigrationReady(channel) {
@@ -1211,7 +1231,7 @@ function validateControl(value) {
     idempotencyKey: requiredString(value.idempotencyKey, 'idempotencyKey', 200),
     operatorId: requiredString(value.operatorId, 'operatorId', 100),
     reason: requiredString(value.reason, 'reason', 500),
-    expectedVersion: Number(value.expectedVersion),
+    expectedVersion: positiveInteger(value.expectedVersion, 'expectedVersion'),
   };
 }
 
@@ -1465,6 +1485,12 @@ function isBlockingReason(reason) {
 function runtimeMode(env) { return String(env.NEWS_RUNTIME_MODE ?? 'bootstrap').toLowerCase(); }
 function requireActiveRuntime(env) {
   if (runtimeMode(env) !== 'active') throw new Error(`Runtime mode ${runtimeMode(env)} blocks delivery operations`);
+}
+function requireReadableRuntime(env) {
+  const mode = runtimeMode(env);
+  if (mode !== 'bootstrap' && mode !== 'active') {
+    throw new Error(`Runtime mode ${mode} blocks coordinator read operations`);
+  }
 }
 function requireControlRuntime(env, action) {
   const mode = runtimeMode(env);

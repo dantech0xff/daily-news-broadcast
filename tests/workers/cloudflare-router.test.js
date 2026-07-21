@@ -332,7 +332,13 @@ describe('production Cloudflare router authorization', () => {
       paused: true,
       version: 2,
     }));
-    const { env: workerEnv, stub } = createEnv({ control });
+    const getQueue = vi.fn(async () => ({
+      date: null,
+      counts: { total: 0, remaining: 0, blocked: 0 },
+      items: [],
+      nextCursor: null,
+    }));
+    const { env: workerEnv, stub } = createEnv({ control, getQueue });
     workerEnv.NEWS_RUNTIME_MODE = 'bootstrap';
 
     const status = await worker.fetch(request('/status?channel=telegram-main', {
@@ -340,6 +346,17 @@ describe('production Cloudflare router authorization', () => {
     }), workerEnv, {});
     expect(status.status).toBe(200);
     expect(stub.getStatus).toHaveBeenCalledOnce();
+
+    const queue = await worker.fetch(request('/queue?channel=telegram-main', {
+      token: TRIGGER_SECRET,
+    }), workerEnv, {});
+    expect(queue.status).toBe(200);
+    expect(stub.getQueue).toHaveBeenCalledWith({
+      channelId: 'telegram-main',
+      publishingDay: undefined,
+      limit: 50,
+      cursor: 0,
+    });
 
     const pause = await worker.fetch(request('/control/pause', {
       method: 'POST',
@@ -364,6 +381,19 @@ describe('production Cloudflare router authorization', () => {
       error: 'runtime_not_active',
       runtimeMode: 'bootstrap',
     });
+  });
+
+  it('rejects queue reads in quiesced mode before coordinator lookup', async () => {
+    const { env: workerEnv, namespace } = createEnv();
+    workerEnv.NEWS_RUNTIME_MODE = 'quiesced';
+
+    const response = await worker.fetch(request('/queue?channel=telegram-main', {
+      token: TRIGGER_SECRET,
+    }), workerEnv, {});
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'runtime_quiesced' });
+    expect(namespace.getByName).not.toHaveBeenCalled();
   });
 });
 

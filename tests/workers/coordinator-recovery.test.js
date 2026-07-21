@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { buildOutputTopology } from '../../src/core/delivery.js';
+import { buildOutputTopology, opaqueId } from '../../src/core/delivery.js';
 
 const ARTICLE = Object.freeze({
   id: 'fixture-article',
@@ -95,6 +95,226 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
         })).rejects.toThrow(/bootstrap.*resume/i);
       } finally {
         instance.env.NEWS_RUNTIME_MODE = previousMode;
+      }
+    });
+  });
+
+  it('rejects malformed control versions before state-machine dispatch', async () => {
+    const channelId = 'invalid-control-version-channel';
+    const stub = coordinator(channelId);
+
+    await runInDurableObject(stub, async instance => {
+      await instance._ensureIdentity(channelId);
+      for (const [ordinal, expectedVersion] of ['abc', 1.5, Number.MAX_SAFE_INTEGER + 1, undefined].entries()) {
+        await expect(instance.control({
+          action: 'pause',
+          channelId,
+          expectedVersion,
+          idempotencyKey: `invalid-control-version-${ordinal}`,
+          operatorId: 'fixture-operator',
+          reason: 'reject malformed operator version',
+        })).rejects.toThrow(/expectedVersion must be a positive integer/i);
+      }
+    });
+  });
+
+  it('rejects a late legacy migration result after channel version drift', async () => {
+    const channelId = 'migration-version-race-channel';
+    const stub = coordinator(channelId);
+
+    await runInDurableObject(stub, async instance => {
+      await instance._ensureIdentity(channelId);
+      const machine = instance._machine(channelId);
+      const initialChannel = await machine.getChannelState();
+      await machine.setPaused(true, {
+        expectedVersion: initialChannel.version,
+        idempotencyKey: 'migration-race-initial-pause',
+        operatorId: 'fixture-operator',
+        reason: 'prepare paused migration race fixture',
+      });
+      const migrationChannel = await machine.getChannelState();
+      const previousMode = instance.env.NEWS_RUNTIME_MODE;
+      const previousCache = instance.env.NEWS_CACHE;
+      const previousFindChannel = instance._findChannel;
+      const previousTransact = instance.store.transact;
+      const transact = previousTransact.bind(instance.store);
+      const topology = await buildOutputTopology([OUTPUT]);
+      const migrationId = await opaqueId('legacy-migration-id', channelId, 'v2');
+      const sourceFingerprint = await opaqueId('legacy-migration', '[]');
+      const operatorActionId = await opaqueId('operator-action', channelId, 'migration-race-late');
+      let injectedRace = false;
+      let transactionCount = 0;
+      instance.env.NEWS_RUNTIME_MODE = 'active';
+      instance.env.NEWS_CACHE = {
+        async list() { return { keys: [], list_complete: true }; },
+        async get() { return null; },
+      };
+      instance.store.transact = async callback => {
+        transactionCount += 1;
+        if (transactionCount === 2 && !injectedRace) {
+          injectedRace = true;
+          const now = new Date().toISOString();
+          await transact(tx => {
+            tx.put('migration_state', migrationId, {
+              migrationId,
+              channelId,
+              sourceFingerprint,
+              destinationFingerprint: topology.fingerprint,
+              state: 'committed',
+              importedAt: now,
+              counts: {
+                keys: 0,
+                seen: 0,
+                digests: 0,
+                queues: 0,
+                importedQueueItems: 0,
+                duplicateQueueItems: 0,
+              },
+              updatedAt: now,
+            }, { expectedVersion: 0 });
+            const currentChannel = tx.get('channel_state', channelId);
+            tx.put('channel_state', channelId, {
+              ...currentChannel,
+              updatedAt: now,
+            }, { expectedVersion: currentChannel.version });
+          });
+        }
+        return transact(callback);
+      };
+      instance._findChannel = () => ({ id: channelId, outputs: [OUTPUT] });
+      try {
+        await expect(instance.control({
+          action: 'migrate-legacy',
+          channelId,
+          expectedVersion: migrationChannel.version,
+          idempotencyKey: 'migration-race-late',
+          operatorId: 'fixture-operator',
+          reason: 'late migration must retain the original version guard',
+        })).rejects.toThrow(/Legacy migration version conflict/i);
+        expect(await instance.store.get('operator_actions', operatorActionId)).toBeNull();
+      } finally {
+        instance.env.NEWS_RUNTIME_MODE = previousMode;
+        instance.env.NEWS_CACHE = previousCache;
+        instance._findChannel = previousFindChannel;
+        instance.store.transact = previousTransact;
+      }
+    });
+  });
+
+  it('replays an exact migration committed concurrently before applying the stale version guard', async () => {
+    const channelId = 'migration-idempotency-race-channel';
+    const idempotencyKey = 'migration-idempotency-race';
+    const operatorId = 'fixture-operator';
+    const reason = 'concurrent exact migration must replay the committed audit';
+    const stub = coordinator(channelId);
+
+    await runInDurableObject(stub, async instance => {
+      await instance._ensureIdentity(channelId);
+      const machine = instance._machine(channelId);
+      const initialChannel = await machine.getChannelState();
+      await machine.setPaused(true, {
+        expectedVersion: initialChannel.version,
+        idempotencyKey: 'migration-idempotency-initial-pause',
+        operatorId,
+        reason: 'prepare paused idempotency race fixture',
+      });
+      const migrationChannel = await machine.getChannelState();
+      const previousMode = instance.env.NEWS_RUNTIME_MODE;
+      const previousCache = instance.env.NEWS_CACHE;
+      const previousFindChannel = instance._findChannel;
+      const previousTransact = instance.store.transact;
+      const transact = previousTransact.bind(instance.store);
+      const topology = await buildOutputTopology([OUTPUT]);
+      const migrationId = await opaqueId('legacy-migration-id', channelId, 'v2');
+      const sourceFingerprint = await opaqueId('legacy-migration', '[]');
+      const operatorActionId = await opaqueId('operator-action', channelId, idempotencyKey);
+      const reasonHash = await opaqueId('operator-reason', channelId, reason);
+      const payloadFingerprint = await opaqueId(
+        'operator-action-payload',
+        'migrate-legacy',
+        migrationChannel.version,
+        operatorId,
+        reasonHash,
+      );
+      let injectedRace = false;
+      let transactionCount = 0;
+      let committedResult;
+      instance.env.NEWS_RUNTIME_MODE = 'active';
+      instance.env.NEWS_CACHE = {
+        async list() { return { keys: [], list_complete: true }; },
+        async get() { return null; },
+      };
+      instance.store.transact = async callback => {
+        transactionCount += 1;
+        if (transactionCount === 2 && !injectedRace) {
+          injectedRace = true;
+          const now = new Date().toISOString();
+          await transact(tx => {
+            const committed = tx.put('migration_state', migrationId, {
+              migrationId,
+              channelId,
+              sourceFingerprint,
+              destinationFingerprint: topology.fingerprint,
+              state: 'committed',
+              importedAt: now,
+              counts: {
+                keys: 0,
+                seen: 0,
+                digests: 0,
+                queues: 0,
+                importedQueueItems: 0,
+                duplicateQueueItems: 0,
+              },
+              updatedAt: now,
+            }, { expectedVersion: 0 });
+            committedResult = {
+              status: 'committed',
+              migrationId,
+              sourceFingerprint,
+              destinationFingerprint: topology.fingerprint,
+              counts: committed.counts,
+              importedAt: now,
+              version: committed.version,
+            };
+            tx.put('operator_actions', operatorActionId, {
+              actionId: operatorActionId,
+              action: 'migrate-legacy',
+              channelId,
+              migrationId,
+              operatorId,
+              reasonHash,
+              payloadFingerprint,
+              state: 'minimized',
+              result: committedResult,
+              createdAt: now,
+              updatedAt: now,
+            }, { expectedVersion: 0 });
+            const currentChannel = tx.get('channel_state', channelId);
+            tx.put('channel_state', channelId, {
+              ...currentChannel,
+              updatedAt: now,
+            }, { expectedVersion: currentChannel.version });
+          });
+        }
+        return transact(callback);
+      };
+      instance._findChannel = () => ({ id: channelId, outputs: [OUTPUT] });
+      try {
+        const replay = await instance.control({
+          action: 'migrate-legacy',
+          channelId,
+          expectedVersion: migrationChannel.version,
+          idempotencyKey,
+          operatorId,
+          reason,
+        });
+        expect(replay).toEqual(committedResult);
+        expect((await instance.store.get('operator_actions', operatorActionId)).version).toBe(1);
+      } finally {
+        instance.env.NEWS_RUNTIME_MODE = previousMode;
+        instance.env.NEWS_CACHE = previousCache;
+        instance._findChannel = previousFindChannel;
+        instance.store.transact = previousTransact;
       }
     });
   });
@@ -538,7 +758,14 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
         },
       });
 
-      const queue = await instance.getQueue({ channelId, limit: 10, cursor: 0 });
+      const previousMode = instance.env.NEWS_RUNTIME_MODE;
+      instance.env.NEWS_RUNTIME_MODE = 'bootstrap';
+      let queue;
+      try {
+        queue = await instance.getQueue({ channelId, limit: 10, cursor: 0 });
+      } finally {
+        instance.env.NEWS_RUNTIME_MODE = previousMode;
+      }
       expect(queue).toEqual({
         date: '2026-07-20',
         counts: { total: 1, remaining: 1, blocked: 1 },
