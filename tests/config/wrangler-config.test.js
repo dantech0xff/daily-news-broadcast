@@ -11,6 +11,8 @@ test('quiesce and final configs target the same worker/runtime/KV/triggers', () 
   }
   assert.equal(section(quiesce, 'triggers'), section(production, 'triggers'));
   assert.equal(kvBinding(quiesce), kvBinding(production));
+  assert.equal(setting(quiesce, 'OPERATOR_KEY_ID'), setting(production, 'OPERATOR_KEY_ID'));
+  assert.equal(setting(production, 'OPERATOR_KEY_ID'), '"operator-main"');
 });
 
 test('quiesce is reversible pre-lifecycle and hard-disables both writers', () => {
