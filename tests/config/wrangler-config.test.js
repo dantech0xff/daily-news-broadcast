@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const production = await readFile(new URL('../../wrangler.toml', import.meta.url), 'utf8');
 const quiesce = await readFile(new URL('../../wrangler.quiesce.toml', import.meta.url), 'utf8');
+const activePaused = await readFile(new URL('../../wrangler.active-paused.toml', import.meta.url), 'utf8');
 
 test('quiesce and final configs target the same worker/runtime/KV/triggers', () => {
   for (const key of ['name', 'main', 'compatibility_date', 'compatibility_flags']) {
@@ -30,6 +31,22 @@ test('final config declares SQLite coordinator in bootstrap and paused mode', ()
   assert.match(production, /NEWS_RUNTIME_MODE\s*=\s*"bootstrap"/);
   assert.match(production, /NEWS_DEFAULT_PAUSED\s*=\s*"true"/);
   assert.match(production, /TOKEN_MAINTENANCE_MODE\s*=\s*"disabled"/);
+});
+
+test('active-paused config changes only the runtime gate from the bootstrap artifact', () => {
+  assert.match(activePaused, /NEWS_RUNTIME_MODE\s*=\s*"active"/);
+  assert.match(activePaused, /NEWS_DEFAULT_PAUSED\s*=\s*"true"/);
+  assert.match(activePaused, /TOKEN_MAINTENANCE_MODE\s*=\s*"disabled"/);
+  assert.equal(
+    activePaused.replace(
+      'NEWS_RUNTIME_MODE = "active"',
+      'NEWS_RUNTIME_MODE = "bootstrap"',
+    ).replace(
+      '# Channel runner remains durably paused; active mode only unlocks audited migration/canary controls.',
+      '# Channel runner: every 30min + hourly token refresh for X/Threads',
+    ),
+    production,
+  );
 });
 
 function setting(text, key) {
