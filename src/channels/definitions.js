@@ -7,6 +7,7 @@ import { bigTechBlogs, aiNewsSources, aiDeepDiveSources } from '../presets/index
 import { createAI } from '../ai/create-ai.js';
 import { TelegramOutput, XOutput, FacebookOutput, ThreadsOutput } from '../outputs/index.js';
 import { KVTokenStore } from '../utils/token-store.js';
+import { validateCronExpression } from './runner.js';
 
 /** Map provider name → env var for API key */
 const PROVIDER_KEY_MAP = {
@@ -31,10 +32,14 @@ const IT_AUDIENCE = 'nguoi lam IT Viet Nam: developers, engineers, product, data
  */
 function e(env, key, fallback) { return env[key] ?? fallback; }
 
-/** parseInt with NaN guard */
+/** Parse a strict base-10 integer without accepting partial or ambiguous values. */
 function eInt(env, key, fallback) {
-  const n = parseInt(env[key]);
-  return isNaN(n) ? fallback : n;
+  const value = env[key];
+  if (value === undefined || value === '') return fallback;
+  if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`${key} must be a safe integer`);
+  }
+  return Number(value);
 }
 
 /**
@@ -45,6 +50,12 @@ function eInt(env, key, fallback) {
 function makeAI(env) {
   const provider = e(env, 'AI_PROVIDER', 'claude').toLowerCase();
   const keyEnv = PROVIDER_KEY_MAP[provider];
+  if (!['ollama'].includes(provider) && (!keyEnv || !env[keyEnv])) {
+    throw new Error(`Missing AI credential${keyEnv ? `: ${keyEnv}` : ` for provider ${provider}`}`);
+  }
+  if (provider === 'custom' && !env.CUSTOM_AI_BASE_URL) {
+    throw new Error('Missing AI endpoint: CUSTOM_AI_BASE_URL');
+  }
   return createAI({
     provider,
     model: e(env, 'AI_MODEL', undefined),
@@ -82,6 +93,7 @@ export function defineChannels(env) {
       },
       mode: e(env, 'BROADCAST_MODE', 'drip'),
       schedule: e(env, 'CRON_SCHEDULE', '0 1,7,13 * * *'),
+      timezone: e(env, 'CRON_TIMEZONE', 'UTC'),
       batchSize: eInt(env, 'DRIP_BATCH_SIZE', 5),
       delayMs: eInt(env, 'DRIP_DELAY_MS', 0),
       maxArticles: eInt(env, 'MAX_ARTICLES', 12),
@@ -91,17 +103,25 @@ export function defineChannels(env) {
   }
 
   // --- X (Twitter) — uncomment when OAuth 2.0 credentials configured ---
-  // Requires: X_CLIENT_ID, TOKEN_ENCRYPTION_KEY, plus token stored in KV
+  // Requires: X_CLIENT_ID, X_DESTINATION_ID, TOKEN_ENCRYPTION_KEY, plus token stored in KV
   if (env.X_CLIENT_ID && env.TOKEN_ENCRYPTION_KEY && env.NEWS_CACHE) {
+    if (!String(env.X_DESTINATION_ID ?? '').trim()) {
+      throw new Error('Missing X destination identity: X_DESTINATION_ID');
+    }
     const kvStore = new KVTokenStore(env.NEWS_CACHE, env.TOKEN_ENCRYPTION_KEY);
     channels.push({
       id: 'x-tech-vn',
       sources: bigTechBlogs(),
       ai: makeAI(env),
-      output: new XOutput({ kvTokenStore: kvStore, channelId: 'x-tech-vn' }),
+      output: new XOutput({
+        kvTokenStore: kvStore,
+        channelId: 'x-tech-vn',
+        destinationId: env.X_DESTINATION_ID,
+      }),
       prompt: { language: 'vi', style: 'digest', audience: IT_AUDIENCE, platform: 'x' },
       mode: 'drip',
       schedule: e(env, 'X_CRON_SCHEDULE', '0 0,6,12 * * *'),
+      timezone: e(env, 'X_CRON_TIMEZONE', e(env, 'CRON_TIMEZONE', 'UTC')),
       batchSize: eInt(env, 'X_BATCH_SIZE', 3),
       delayMs: 0,
       maxArticles: 10,
@@ -121,6 +141,7 @@ export function defineChannels(env) {
       prompt: { language: 'vi', style: 'digest', audience: IT_AUDIENCE, platform: 'facebook' },
       mode: 'drip',
       schedule: e(env, 'FB_CRON_SCHEDULE', '0 1,7,13 * * *'),
+      timezone: e(env, 'FB_CRON_TIMEZONE', e(env, 'CRON_TIMEZONE', 'UTC')),
       batchSize: eInt(env, 'FB_BATCH_SIZE', 1),
       delayMs: 0,
       maxArticles: 10,
@@ -141,6 +162,7 @@ export function defineChannels(env) {
       prompt: { language: 'vi', style: 'digest', audience: IT_AUDIENCE, platform: 'threads' },
       mode: 'drip',
       schedule: e(env, 'THREADS_CRON_SCHEDULE', '0 2,8 * * *'),
+      timezone: e(env, 'THREADS_CRON_TIMEZONE', e(env, 'CRON_TIMEZONE', 'UTC')),
       batchSize: 2,
       delayMs: 0,
       maxArticles: 8,
@@ -149,5 +171,38 @@ export function defineChannels(env) {
     });
   }
 
+  return validateChannels(channels);
+}
+
+/** Validate channel identity and runtime contracts before any request is claimed. */
+export function validateChannels(channels) {
+  if (!Array.isArray(channels)) throw new Error('Channels must be an array');
+  const ids = new Set();
+  for (const channel of channels) {
+    if (!channel || typeof channel.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,127}$/.test(channel.id)) {
+      throw new Error('Every channel requires a stable id');
+    }
+    if (ids.has(channel.id)) throw new Error(`Duplicate channel id: ${channel.id}`);
+    ids.add(channel.id);
+    if (!['digest', 'drip'].includes(channel.mode)) throw new Error(`Invalid mode for channel ${channel.id}`);
+    if (!validateCronExpression(channel.schedule)) throw new Error(`Invalid cron schedule for channel ${channel.id}: ${channel.schedule}`);
+    try { new Intl.DateTimeFormat('en', { timeZone: channel.timezone || 'UTC' }).format(); }
+    catch { throw new Error(`Invalid timezone for channel ${channel.id}: ${channel.timezone}`); }
+    if (!Array.isArray(channel.sources) || channel.sources.length === 0) throw new Error(`Channel ${channel.id} has no sources`);
+    if (!channel.ai) throw new Error(`Channel ${channel.id} has no AI provider`);
+    if (!channel.output) throw new Error(`Channel ${channel.id} has no output`);
+    validateInteger(channel.concurrency, `Channel ${channel.id} concurrency`, 1, 50);
+    validateInteger(channel.batchSize, `Channel ${channel.id} batchSize`, 1, 100);
+    validateInteger(channel.delayMs, `Channel ${channel.id} delayMs`, 0, 3_600_000);
+    validateInteger(channel.maxArticles, `Channel ${channel.id} maxArticles`, 1, 500);
+    validateInteger(channel.maxArticlesPerSource, `Channel ${channel.id} maxArticlesPerSource`, 1, 100);
+  }
   return channels;
+}
+
+function validateInteger(value, label, minimum, maximum) {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${label} must be an integer in range ${minimum}-${maximum}`);
+  }
 }

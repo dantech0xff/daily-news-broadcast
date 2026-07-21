@@ -5,6 +5,18 @@
 
 import { SourcePlugin } from '../core/contracts.js';
 import { enrichMissingImages } from './og-image.js';
+import {
+  SOURCE_FETCH_DIAGNOSTIC_CAPABILITY,
+  discardSourceResponse,
+  fetchSourceWithDiagnostics,
+  httpSourceFailure,
+  invalidSourceShape,
+  parseSourceFailure,
+  readLastFetchDiagnostic,
+  readSourceText,
+  runDiagnosedFetch,
+  validateArticleArray,
+} from './source-result.js';
 
 export class RSSSource extends SourcePlugin {
   /**
@@ -23,28 +35,52 @@ export class RSSSource extends SourcePlugin {
 
   get id() { return this._config.id; }
   get name() { return this._config.name; }
+  get sourceKey() {
+    return JSON.stringify([
+      'rss', this.id, this.name, this._config.feedUrl,
+      this._config.baseUrl ?? '', this._config.category ?? '',
+    ]);
+  }
   get icon() { return this._config.icon || '📰'; }
+  get diagnosticCapability() { return SOURCE_FETCH_DIAGNOSTIC_CAPABILITY; }
+  get lastFetchDiagnostic() { return readLastFetchDiagnostic(this); }
+
+  async fetchWithDiagnostics(options = {}) {
+    return fetchSourceWithDiagnostics(this, options);
+  }
 
   async fetch(options = {}) {
-    const { limit = 5, since } = options;
+    return runDiagnosedFetch(this, options, async () => {
+      const { limit = 5, since } = options;
 
-    const response = await fetchWithTimeout(this._config.feedUrl, 15000);
-    if (!response.ok) return [];
+      const xml = await withResponseTimeout(
+        this._config.feedUrl,
+        15000,
+        options.signal,
+        async response => {
+          if (!response.ok) {
+            await discardSourceResponse(response);
+            throw httpSourceFailure(response.status);
+          }
+          return readSourceText(response);
+        },
+      );
+      validateFeedDocument(xml);
+      let articles = this._parseXML(xml);
+      validateArticleArray(articles);
 
-    const xml = await response.text();
-    let articles = this._parseXML(xml);
+      // Filter by date
+      if (since) {
+        articles = articles.filter(a => !a.publishedAt || a.publishedAt > since);
+      }
 
-    // Filter by date
-    if (since) {
-      articles = articles.filter(a => !a.publishedAt || a.publishedAt > since);
-    }
+      articles = articles.slice(0, limit);
 
-    articles = articles.slice(0, limit);
+      // Fetch og:image for articles missing imageUrl
+      await enrichMissingImages(articles, { signal: options.signal });
 
-    // Fetch og:image for articles missing imageUrl
-    await enrichMissingImages(articles);
-
-    return articles;
+      return articles;
+    });
   }
 
   _parseXML(xml) {
@@ -171,15 +207,134 @@ function resolveUrl(url, base) {
   try { return new URL(url, base).href; } catch { return url; }
 }
 
-async function fetchWithTimeout(url, timeoutMs = 15000) {
+function validateFeedDocument(xml) {
+  if (typeof xml !== 'string' || !xml.trim()) throw parseSourceFailure();
+
+  const structuralXML = xml
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+  const document = assertWellFormedXML(structuralXML);
+  const rootName = document.rootName.toLowerCase();
+
+  if (rootName === 'rss') {
+    assertFeedTagStructure(document.elements, {
+      tags: ['rss', 'channel', 'item'],
+      required: { rss: 1, channel: 1 },
+      parent: { rss: null, channel: 'rss', item: 'channel' },
+    });
+    return;
+  }
+
+  if (rootName === 'feed') {
+    assertFeedTagStructure(document.elements, {
+      tags: ['feed', 'entry'],
+      required: { feed: 1 },
+      parent: { feed: null, entry: 'feed' },
+    });
+    return;
+  }
+
+  throw invalidSourceShape();
+}
+
+function assertWellFormedXML(xml) {
+  const stack = [];
+  const elements = [];
+  const roots = [];
+  const tokenPattern = /<([^>]*)>/g;
+  let previousEnd = 0;
+  let match;
+
+  assertValidXMLContent(xml);
+
+  while ((match = tokenPattern.exec(xml))) {
+    const text = xml.slice(previousEnd, match.index);
+    if (text.includes('<') || (stack.length === 0 && text.trim())) throw parseSourceFailure();
+    previousEnd = tokenPattern.lastIndex;
+
+    const token = match[1].trim();
+    if (!token) throw parseSourceFailure();
+    if (token.startsWith('?')) continue;
+    if (token.startsWith('!')) {
+      if (!/^!DOCTYPE\b/i.test(token) || stack.length > 0 || roots.length > 0) {
+        throw parseSourceFailure();
+      }
+      continue;
+    }
+
+    if (token.startsWith('/')) {
+      const closingMatch = token.match(/^\/\s*([A-Za-z_][\w:.-]*)\s*$/);
+      if (!closingMatch || stack.pop() !== closingMatch[1]) throw parseSourceFailure();
+      continue;
+    }
+
+    const selfClosing = /\/\s*$/.test(token);
+    const openingToken = selfClosing ? token.replace(/\/\s*$/, '').trimEnd() : token;
+    const openingMatch = openingToken.match(/^([A-Za-z_][\w:.-]*)([\s\S]*)$/);
+    if (!openingMatch) throw parseSourceFailure();
+    validateXMLAttributes(openingMatch[2]);
+    const parentName = stack.at(-1) || null;
+    if (!parentName) roots.push(openingMatch[1]);
+    elements.push({ name: openingMatch[1], parentName, selfClosing });
+    if (!selfClosing) stack.push(openingMatch[1]);
+  }
+
+  const trailingText = xml.slice(previousEnd);
+  if (trailingText.includes('<') || trailingText.trim() || stack.length > 0 || roots.length !== 1) {
+    throw parseSourceFailure();
+  }
+  return { rootName: roots[0], elements };
+}
+
+function assertValidXMLContent(xml) {
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(xml)) throw parseSourceFailure();
+  if (/&(?!(?:amp|lt|gt|apos|quot|#\d+|#x[\da-f]+);)/i.test(xml)) throw parseSourceFailure();
+}
+
+function validateXMLAttributes(rawAttributes) {
+  if (rawAttributes.includes('<')) throw parseSourceFailure();
+  let remainder = rawAttributes;
+  const names = new Set();
+
+  while (remainder.trim()) {
+    const match = remainder.match(/^\s+([A-Za-z_][\w:.-]*)\s*=\s*("[^"]*"|'[^']*')/);
+    if (!match || names.has(match[1])) throw parseSourceFailure();
+    names.add(match[1]);
+    remainder = remainder.slice(match[0].length);
+  }
+}
+
+function assertFeedTagStructure(elements, { tags, required, parent }) {
+  const openingCounts = Object.fromEntries(tags.map(tag => [tag, 0]));
+  for (const element of elements) {
+    const tag = element.name.toLowerCase();
+    if (!tags.includes(tag)) continue;
+    if (element.selfClosing) throw parseSourceFailure();
+    const expectedParent = parent[tag];
+    const actualParent = element.parentName?.toLowerCase() || null;
+    if (actualParent !== expectedParent) throw parseSourceFailure();
+    openingCounts[tag] += 1;
+  }
+
+  for (const [tag, expectedCount] of Object.entries(required)) {
+    if (openingCounts[tag] !== expectedCount) throw parseSourceFailure();
+  }
+}
+
+async function withResponseTimeout(url, timeoutMs, externalSignal, consume) {
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       signal: controller.signal,
       headers: { 'User-Agent': 'NewsEngine/2.0' },
     });
+    return await consume(response);
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', abortFromExternal);
   }
 }

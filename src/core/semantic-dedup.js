@@ -37,7 +37,7 @@ function similarity(a, b) {
 export function createSemanticDedupMiddleware(options = {}) {
   const { threshold = 0.65 } = options;
 
-  return (articles) => {
+  const middleware = (articles) => {
     const kept = [];
     const bigramCache = new Map();
     const cachedBigrams = (s) => {
@@ -87,4 +87,6 @@ export function createSemanticDedupMiddleware(options = {}) {
 
     return kept;
   };
+  middleware.selectionKey = JSON.stringify(['semantic-dedup', threshold]);
+  return middleware;
 }

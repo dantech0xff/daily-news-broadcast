@@ -26,6 +26,7 @@ export function loadConfig(configPath) {
       enabled: s.enabled !== false,
       cron: s.cron || '0 7 * * *',
       timezone: s.timezone || 'UTC',
+      mode: s.mode || s.options?.mode || 'digest',
       sources: s.sources || [],
       ai: s.ai || null,
       outputs: s.outputs || [],
@@ -34,9 +35,7 @@ export function loadConfig(configPath) {
     return { streams, configPath: path };
   } catch (err) {
     if (err.code === 'ENOENT') {
-      console.error(`[Config] File not found: ${path}`);
-      console.error(`[Config] Create streams.config.json — see streams.config.example.json`);
-      process.exit(1);
+      throw new Error(`Config file not found: ${path}. Create streams.config.json from streams.config.example.json`);
     }
     throw err;
   }

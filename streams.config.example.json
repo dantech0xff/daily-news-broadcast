@@ -4,6 +4,7 @@
       "id": "morning-tech-digest",
       "name": "Morning Tech Digest",
       "enabled": true,
+      "mode": "digest",
       "cron": "0 7 * * *",
       "timezone": "Asia/Ho_Chi_Minh",
       "sources": [
@@ -37,6 +38,7 @@
       "id": "ai-news-evening",
       "name": "AI/ML Evening Brief",
       "enabled": true,
+      "mode": "digest",
       "cron": "0 18 * * 1-5",
       "timezone": "Asia/Ho_Chi_Minh",
       "sources": [
@@ -74,6 +76,7 @@
       "id": "ai-pulse-daily",
       "name": "AI Pulse Daily",
       "enabled": false,
+      "mode": "drip",
       "cron": "0 8,14 * * *",
       "timezone": "Asia/Ho_Chi_Minh",
       "sources": [
@@ -104,6 +107,7 @@
       "id": "devops-weekly",
       "name": "DevOps Weekly Roundup",
       "enabled": false,
+      "mode": "digest",
       "cron": "0 9 * * 1",
       "timezone": "UTC",
       "sources": [

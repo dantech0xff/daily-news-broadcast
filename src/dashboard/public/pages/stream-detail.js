@@ -43,15 +43,20 @@ function outputLabel(out) {
 export default function StreamDetailPage({ id }) {
   const [stream, setStream] = useState(null);
   const [runs, setRuns] = useState(null);
+  const [recovery, setRecovery] = useState(null);
+  const [recoveryOffset, setRecoveryOffset] = useState(0);
   const [action, setAction] = useState(null);
 
   const loadStream = useCallback(() => api(`/streams/${id}`).then(setStream).catch(e => toast(e.message, 'error')), [id]);
   const loadRuns = useCallback(() => api(`/streams/${id}/runs?limit=50`).then(setRuns).catch(e => toast(e.message, 'error')), [id]);
+  const loadRecovery = useCallback(() => api(`/streams/${id}/unresolved?limit=50&offset=${recoveryOffset}`)
+    .then(setRecovery)
+    .catch(() => setRecovery({ unavailable: true, channel: null, targets: [], page: { total: 0, limit: 50, offset: 0 } })), [id, recoveryOffset]);
 
-  useEffect(() => { loadStream(); loadRuns(); }, [id]);
+  useEffect(() => { loadStream(); loadRuns(); loadRecovery(); }, [id, recoveryOffset]);
   useSSE((event) => {
     if (event.data?.streamId === id || event.type?.startsWith('run:')) {
-      loadStream(); loadRuns();
+      loadStream(); loadRuns(); loadRecovery();
     }
   });
 
@@ -137,6 +142,56 @@ export default function StreamDetailPage({ id }) {
             ${stream.outputs.map((o, i) => html`<span key=${i} class="plugin-tag">${outputLabel(o)}</span>`)}
           </div>
         </div>
+      </div>
+
+      <!-- Redacted Recovery Targets -->
+      <div class="card" style="margin-bottom:24px">
+        <div class="card-header">
+          <span class="card-title">Recovery Targets</span>
+          <span style="font-size:12px;color:var(--text-dim)">${recovery?.page?.total || 0} unresolved</span>
+        </div>
+        ${!recovery ? html`<div style="text-align:center;padding:24px"><div class="spinner"></div></div>` :
+          recovery.unavailable ? html`<div class="empty-state" style="padding:24px">Operator access required.</div>` : html`
+            ${recovery.channel ? html`
+              <div style="font-size:12px;margin-bottom:12px;color:var(--text-dim)">
+                Channel: <strong>${recovery.channel.state}</strong>
+                · expected version ${recovery.channel.expectedVersion}
+                · ${recovery.channel.allowedActions.join(', ')}
+              </div>
+            ` : null}
+            ${recovery.targets.length === 0 ? html`
+              <div class="empty-state" style="padding:24px">No unresolved delivery targets.</div>
+            ` : html`
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Kind</th><th>Exact target</th><th>State</th><th>Version</th><th>Allowed actions</th></tr></thead>
+                  <tbody>
+                    ${recovery.targets.map((target, index) => html`
+                      <tr key=${`${target.kind}-${index}`}>
+                        <td><span class="meta-tag">${target.kind}</span></td>
+                        <td style="font-size:11px;word-break:break-all">
+                          ${target.deliveryId ? html`delivery: ${target.deliveryId}` : null}
+                          ${target.outputKey ? html`<br />output: ${target.outputKey}` : null}
+                          ${target.outboxId ? html`outbox: ${target.outboxId}` : null}
+                        </td>
+                        <td><${StatusBadge} status=${target.state} /></td>
+                        <td>${target.expectedVersion}</td>
+                        <td style="font-size:12px">${target.allowedActions.join(', ')}</td>
+                      </tr>
+                    `)}
+                  </tbody>
+                </table>
+              </div>
+            `}
+            ${recovery.page.total > recovery.page.limit ? html`
+              <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+                <button class="btn" disabled=${recoveryOffset === 0}
+                  onClick=${() => setRecoveryOffset(Math.max(0, recoveryOffset - recovery.page.limit))}>Previous</button>
+                <button class="btn" disabled=${recoveryOffset + recovery.page.limit >= recovery.page.total}
+                  onClick=${() => setRecoveryOffset(recoveryOffset + recovery.page.limit)}>Next</button>
+              </div>
+            ` : null}
+          `}
       </div>
 
       <!-- Run History -->

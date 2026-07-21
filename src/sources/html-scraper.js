@@ -5,6 +5,18 @@
 
 import { SourcePlugin } from '../core/contracts.js';
 import { cleanHTML } from './rss.js';
+import {
+  SOURCE_FETCH_DIAGNOSTIC_CAPABILITY,
+  discardSourceResponse,
+  fetchSourceWithDiagnostics,
+  httpSourceFailure,
+  invalidSourceShape,
+  readLastFetchDiagnostic,
+  readSourceText,
+  runDiagnosedFetch,
+  unknownSourceResult,
+  validateArticleArray,
+} from './source-result.js';
 
 export class HTMLScraperSource extends SourcePlugin {
   /**
@@ -23,18 +35,45 @@ export class HTMLScraperSource extends SourcePlugin {
 
   get id() { return this._config.id; }
   get name() { return this._config.name; }
+  get sourceKey() {
+    return JSON.stringify([
+      'html-scraper', this.id, this.name, this._config.url,
+      this._config.category ?? '',
+      Object.entries(this._config.selectors ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+    ]);
+  }
   get icon() { return this._config.icon || '🌐'; }
+  get diagnosticCapability() { return SOURCE_FETCH_DIAGNOSTIC_CAPABILITY; }
+  get lastFetchDiagnostic() { return readLastFetchDiagnostic(this); }
+
+  async fetchWithDiagnostics(options = {}) {
+    return fetchSourceWithDiagnostics(this, options);
+  }
 
   async fetch(options = {}) {
-    const { limit = 5 } = options;
+    return runDiagnosedFetch(this, options, async () => {
+      const { limit = 5 } = options;
 
-    const response = await fetch(this._config.url, {
-      headers: { 'User-Agent': 'NewsEngine/2.0', 'Accept': 'text/html' },
+      const response = await fetch(this._config.url, {
+        signal: options.signal,
+        headers: { 'User-Agent': 'NewsEngine/2.0', 'Accept': 'text/html' },
+      });
+      if (!response.ok) {
+        await discardSourceResponse(response);
+        throw httpSourceFailure(response.status);
+      }
+
+      const html = await readSourceText(response);
+      validateHTMLDocument(html);
+      const articles = this._extractArticles(html);
+      validateArticleArray(articles);
+      if (articles.length > 0) return articles.slice(0, limit);
+
+      // A syntactically valid page with no recognizable article structure may
+      // have changed layout. It is not sufficient evidence of source exhaustion.
+      if (hasRecognizableArticleMarkup(html)) throw invalidSourceShape();
+      return unknownSourceResult();
     });
-    if (!response.ok) return [];
-
-    const html = await response.text();
-    return this._extractArticles(html).slice(0, limit);
   }
 
   _extractArticles(html) {
@@ -111,4 +150,17 @@ export class HTMLScraperSource extends SourcePlugin {
     if (url.startsWith('http')) return url;
     try { return new URL(url, this._config.url).href; } catch { return url; }
   }
+}
+
+function validateHTMLDocument(html) {
+  if (typeof html !== 'string' || !html.trim()) throw invalidSourceShape();
+
+  const hasDocument = /<html(?:\s|>)/i.test(html) && /<\/html\s*>/i.test(html);
+  const hasArticleFragment = /<article(?:\s|>)[\s\S]*<\/article\s*>/i.test(html);
+  if (!hasDocument && !hasArticleFragment) throw invalidSourceShape();
+}
+
+function hasRecognizableArticleMarkup(html) {
+  return /<article(?:\s|>)/i.test(html)
+    || /<a[^>]*href="[^"]*(?:blog|post|article|engineering)[^"]*"/i.test(html);
 }

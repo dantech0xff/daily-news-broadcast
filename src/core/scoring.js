@@ -55,7 +55,7 @@ export function createScoringMiddleware(options = {}) {
   const { maxArticles = 20, credibilityWeights = {} } = options;
   const weights = { ...DEFAULT_CREDIBILITY, ...credibilityWeights };
 
-  return (articles) => {
+  const middleware = (articles) => {
     const scored = articles.map(article => {
       const score = Math.round(
         engagementScore(article.meta) +
@@ -71,4 +71,9 @@ export function createScoringMiddleware(options = {}) {
     scored.sort((a, b) => (b.meta.score || 0) - (a.meta.score || 0));
     return scored.slice(0, maxArticles);
   };
+  middleware.selectionKey = JSON.stringify([
+    'scoring', maxArticles,
+    Object.entries(weights).sort(([left], [right]) => left.localeCompare(right)),
+  ]);
+  return middleware;
 }

@@ -12,18 +12,23 @@
     "docker:build": "docker build -t news-engine .",
     "docker:run": "docker compose up -d",
     "dashboard": "node src/dashboard/server.js",
-    "dashboard:dev": "node --watch src/dashboard/server.js"
+    "dashboard:dev": "node --watch src/dashboard/server.js",
+    "test": "npm run test:node && npm run test:workers",
+    "test:node": "node tests/run-node-tests.js",
+    "test:workers": "vitest run --config vitest.config.js"
   },
   "dependencies": {
     "express": "^5.2.1",
-    "node-cron": "^3.0.3"
+    "node-cron": "^4.6.0"
   },
   "optionalDependencies": {
     "dotenv": "^16.4.0",
     "redis": "^4.7.0"
   },
   "devDependencies": {
-    "wrangler": "^3.0.0"
+    "@cloudflare/vitest-pool-workers": "0.18.6",
+    "vitest": "4.1.10",
+    "wrangler": "4.112.0"
   },
   "engines": {
     "node": ">=18.0.0"

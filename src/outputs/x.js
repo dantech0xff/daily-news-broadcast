@@ -5,6 +5,20 @@
  */
 
 import { OutputPlugin } from '../core/contracts.js';
+import {
+  createOutputDependencies,
+  destinationDeliveryKey,
+  exceptionFailureResult,
+  failureResult,
+  fetchWithTimeout,
+  httpFailureResult,
+  invalidResponseResult,
+  normalizeMessageId,
+  partResult,
+  readResponseBody,
+  successResult,
+  withPartialMutation,
+} from './telegram-client.js';
 
 const X_API = 'https://api.x.com/2/tweets';
 const MAX_TWEET = 280;
@@ -15,39 +29,44 @@ export class XOutput extends OutputPlugin {
    * @param {Object} config
    * @param {string} [config.accessToken] - OAuth 2.0 Bearer token (direct)
    * @param {Object} [config.kvTokenStore] - KVTokenStore instance for encrypted token
-   * @param {string} [config.channelId] - Channel ID for KV token lookup
+   * @param {string} [config.channelId] - Stable channel/account identifier
+   * @param {string} config.destinationId - Stable non-secret authenticated account identifier
    */
-  constructor(config) {
+  constructor(config, dependencies = {}) {
     super();
+    const destinationId = String(config.destinationId ?? '').trim();
+    if (!destinationId) {
+      throw new Error('X destinationId is required to bind delivery state to an authenticated account');
+    }
     this._accessToken = config.accessToken;
     this._kvStore = config.kvTokenStore;
     this._channelId = config.channelId;
+    this._dependencies = createOutputDependencies(config, dependencies);
+    this._deliveryKey = destinationDeliveryKey(
+      'x',
+      destinationId,
+      config.deliveryKey,
+    );
   }
 
   get id() { return 'x'; }
   get name() { return 'X (Twitter)'; }
   get maxLength() { return MAX_TWEET * MAX_TWEETS_PER_THREAD; }
+  get deliveryKey() { return this._deliveryKey; }
 
-  /** Resolve token from direct config or KV store */
   async _getToken() {
     if (this._accessToken) return this._accessToken;
     if (this._kvStore && this._channelId) {
       const token = await this._kvStore.getToken(this._channelId);
-      if (!token) throw new Error(`X token not found in KV for ${this._channelId}`);
+      if (!token) throw new Error('X token unavailable');
       return token;
     }
-    throw new Error('XOutput: no accessToken or kvTokenStore configured');
+    throw new Error('X token unavailable');
   }
 
-  /**
-   * Refresh OAuth 2.0 token using refresh_token
-   * @param {Object} kvStore - KVTokenStore
-   * @param {string} channelId
-   * @param {string} refreshToken
-   * @param {string} clientId - X app client ID
-   */
-  static async refreshToken(kvStore, channelId, refreshToken, clientId) {
-    const res = await fetch('https://api.x.com/2/oauth2/token', {
+  static async refreshToken(kvStore, channelId, refreshToken, clientId, dependencies = {}) {
+    const deps = createOutputDependencies({}, dependencies);
+    const response = await fetchWithTimeout(deps.fetchImpl, 'https://api.x.com/2/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -55,93 +74,153 @@ export class XOutput extends OutputPlugin {
         refresh_token: refreshToken,
         client_id: clientId,
       }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(`X token refresh failed: ${data.error_description || res.status}`);
+    }, deps);
+    const parsed = await readResponseBody(response);
+    const data = parsed.data;
+    if (!response.ok || !parsed.validJson || !data?.access_token) {
+      throw new Error(`X token refresh failed (${response.status || 'invalid response'})`);
+    }
 
-    // Store new access token (2h expiry)
     await kvStore.setToken(channelId, data.access_token, data.expires_in * 1000);
-    // Store new refresh token (6 months) — X rotates refresh tokens
     if (data.refresh_token) {
       await kvStore.setToken(`${channelId}:refresh`, data.refresh_token, 180 * 24 * 3600 * 1000);
     }
-    console.log(`[X] Token refreshed for ${channelId}, expires in ${data.expires_in}s`);
     return data;
   }
 
-  async send(content) {
-    const token = await this._getToken();
+  async send(content, options = {}) {
+    let token;
+    try {
+      token = await this._getToken();
+    } catch {
+      return failureResult({
+        deliveryState: 'definitive_failure',
+        retryDisposition: 'manual',
+        error: 'X credentials are unavailable',
+        providerCode: 'credentials_unavailable',
+        now: this._dependencies.now,
+      });
+    }
+
     const tweets = splitIntoTweets(content);
-    let replyToId = null;
-    let firstId = null;
+    if (tweets.length === 0) {
+      return failureResult({
+        deliveryState: 'definitive_failure',
+        retryDisposition: 'never',
+        error: 'X content is empty',
+        providerCode: 'invalid_content',
+        now: this._dependencies.now,
+      });
+    }
+
+    const successfulMessageIds = [];
+    const partResults = [];
+    let replyToId;
 
     for (let i = 0; i < tweets.length; i++) {
       const body = { text: tweets[i] };
       if (replyToId) body.reply = { in_reply_to_tweet_id: replyToId };
+      const result = await this._sendTweet(body, token, options.signal);
+      partResults.push(partResult(i + 1, result, 'tweet'));
 
-      const res = await fetch(X_API, {
+      if (!result.success) {
+        const metadata = {
+          ...result.meta,
+          tweetCount: tweets.length,
+          partsAttempted: partResults.length,
+          partsTotal: tweets.length,
+          failedAt: i + 1,
+          partResults,
+        };
+        if (successfulMessageIds.length > 0) {
+          return withPartialMutation({ ...result, meta: metadata }, {
+            successfulMessageIds,
+            completedSteps: successfulMessageIds.length,
+            totalSteps: tweets.length,
+            failedStep: i + 1,
+            partResults,
+          });
+        }
+        return { ...result, meta: metadata };
+      }
+
+      if (result.messageId) {
+        successfulMessageIds.push(result.messageId);
+        replyToId = result.messageId;
+      }
+      if (i < tweets.length - 1) await this._dependencies.sleep(500);
+    }
+
+    return successResult(successfulMessageIds[0], {
+      tweetCount: tweets.length,
+      partsAttempted: tweets.length,
+      partsTotal: tweets.length,
+      successfulMessageIds,
+      partResults,
+    });
+  }
+
+  async _sendTweet(body, token, signal) {
+    try {
+      const response = await fetchWithTimeout(this._dependencies.fetchImpl, X_API, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify(body),
+        signal,
+      }, this._dependencies);
+      const parsed = await readResponseBody(response);
+      const data = parsed.data;
+
+      if (response.ok) {
+        const messageId = normalizeMessageId(data?.data?.id);
+        return messageId
+          ? successResult(messageId)
+          : invalidResponseResult('X', { now: this._dependencies.now });
+      }
+
+      const duplicate = response.status === 403 && /duplicate/i.test(String(data?.detail || ''));
+      if (duplicate) {
+        return failureResult({
+          deliveryState: 'definitive_failure',
+          retryDisposition: 'never',
+          error: 'X rejected a duplicate post',
+          providerCode: 'duplicate',
+          now: this._dependencies.now,
+          meta: { duplicate: true },
+        });
+      }
+
+      return httpFailureResult({
+        status: response.status,
+        headers: response.headers,
+        error: data?.detail || data?.title || parsed.readError || parsed.text,
+        providerCode: data?.errors?.[0]?.code || response.status,
+        now: this._dependencies.now,
       });
-
-      const data = await res.json();
-
-      if (res.status === 403 && data.detail?.includes('duplicate')) {
-        console.log(`[X] Duplicate tweet skipped: ${tweets[i].substring(0, 40)}...`);
-        return { success: true, messageId: firstId, meta: { duplicate: true } };
-      }
-      if (!res.ok) {
-        // Partial thread posted — return failure with context so engine doesn't retry
-        if (firstId) {
-          console.error(`[X] Thread failed at tweet ${i + 1}/${tweets.length}: ${res.status}`);
-          return { success: false, messageId: firstId, error: `Failed at tweet ${i + 1}`, meta: { partialThread: true, failedAt: i } };
-        }
-        throw new Error(`X API error ${res.status}: ${JSON.stringify(data)}`);
-      }
-
-      replyToId = data.data.id;
-      if (i === 0) firstId = replyToId;
-
-      // Brief delay between thread tweets to avoid rate issues
-      if (i < tweets.length - 1) await sleep(500);
+    } catch (error) {
+      return exceptionFailureResult(error, { now: this._dependencies.now });
     }
-
-    return {
-      success: true,
-      messageId: firstId,
-      meta: { tweetCount: tweets.length },
-    };
   }
 }
 
-/**
- * Split content into tweet-sized segments
- * Detects thread format (1/n, 2/n) or treats as single tweet
- */
 function splitIntoTweets(content) {
-  const segments = content.split(/\n\n+/).filter(s => s.trim());
-  // Check if ANY segment starts with N/N pattern (not just first — AI may add preamble)
-  const hasThreadFormat = segments.length > 1 && segments.some(s => /^\d+\/\d+/.test(s.trim()));
+  const segments = content.split(/\n\n+/).filter(segment => segment.trim());
+  const hasThreadFormat = segments.length > 1
+    && segments.some(segment => /^\d+\/\d+/.test(segment.trim()));
 
   if (hasThreadFormat) {
-    // Keep only numbered segments
-    const numbered = segments.filter(s => /^\d+\/\d+/.test(s.trim()));
-    return numbered
+    return segments
+      .filter(segment => /^\d+\/\d+/.test(segment.trim()))
       .slice(0, MAX_TWEETS_PER_THREAD)
-      .map(t => t.trim())
-      .map(t => t.length > MAX_TWEET ? t.substring(0, MAX_TWEET - 1) + '…' : t);
+      .map(tweet => tweet.trim())
+      .map(tweet => tweet.length > MAX_TWEET ? `${tweet.substring(0, MAX_TWEET - 1)}…` : tweet);
   }
 
-  // Single tweet fallback
-  if (content.length > MAX_TWEET) {
-    console.warn(`[X] Content ${content.length} chars truncated to ${MAX_TWEET} (no thread format detected)`);
-  }
-  const truncated = content.length > MAX_TWEET ? content.substring(0, MAX_TWEET - 1) + '…' : content;
-  return [truncated.trim()].filter(t => t.length > 0);
+  const truncated = content.length > MAX_TWEET
+    ? `${content.substring(0, MAX_TWEET - 1)}…`
+    : content;
+  return [truncated.trim()].filter(tweet => tweet.length > 0);
 }
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
