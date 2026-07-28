@@ -720,6 +720,11 @@ export class NewsEngine {
           aiUsage = generated.usage ?? null;
           delivery = await machine.commitGeneration(claim.attempt.attemptId, { content: generated.text });
         } catch (error) {
+          console.error('[AI] Generation failed', {
+            channelId: this.options.channelId,
+            deliveryId,
+            error: sanitizeError(error),
+          });
           delivery = await machine.failGeneration(claim.attempt.attemptId, error, { retryDisposition: 'automatic' });
           return this._resultFromDelivery(delivery, {
             sourceHealth,

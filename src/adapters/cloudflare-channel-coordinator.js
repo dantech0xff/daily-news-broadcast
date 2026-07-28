@@ -530,6 +530,11 @@ export class ChannelDeliveryCoordinator extends DurableObject {
           const committed = await machine.commitGeneration(result.attempt.attemptId, { content: generated.text });
           return projectControlResult({ status: committed.state, delivery: committed }, action.requestId);
         } catch (error) {
+          console.error('[AI] Operator generation retry failed', {
+            channelId: action.channelId,
+            deliveryId: action.deliveryId,
+            error: sanitizeError(error),
+          });
           const failed = await machine.failGeneration(result.attempt.attemptId, error, { retryDisposition: 'never' });
           return projectControlResult({ status: failed.state, delivery: failed }, action.requestId);
         }
