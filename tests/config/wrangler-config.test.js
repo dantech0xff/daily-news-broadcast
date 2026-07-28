@@ -32,7 +32,7 @@ test('final config declares SQLite coordinator in bootstrap and paused mode', ()
   assert.match(production, /NEWS_RUNTIME_MODE\s*=\s*"bootstrap"/);
   assert.match(production, /NEWS_DEFAULT_PAUSED\s*=\s*"true"/);
   assert.match(production, /TOKEN_MAINTENANCE_MODE\s*=\s*"disabled"/);
-  assert.equal(setting(production, 'BUILD_VERSION'), '"gemini-3.5-flash-lite-20260728"');
+  assert.equal(setting(production, 'BUILD_VERSION'), '"cloudflare-aig-byok-20260729"');
   assert.equal(setting(production, 'AI_MODEL'), '"gemini-3.5-flash-lite"');
 });
 

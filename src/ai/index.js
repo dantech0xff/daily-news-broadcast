@@ -8,6 +8,7 @@ export {
   openai,
   groq,
   gemini,
+  geminiGateway,
   ollama,
   openRouter,
   togetherAI,

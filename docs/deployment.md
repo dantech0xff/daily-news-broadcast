@@ -6,9 +6,9 @@ Production URL: <https://news-engine.dan-tran.workers.dev>
 
 The Worker is promoted in stages. Production is currently on the post-lifecycle `active` runtime with the Telegram coordinator resumed. The SQLite Durable Object lifecycle, legacy KV import, one-message canary, and explicit per-channel resume are complete. Standard Telegram photo captions are deployed; provider-level verification will occur on the next scheduled news item. Token maintenance remains disabled until separately approved.
 
-Current incident state (2026-07-28):
+Current incident state (2026-07-29):
 
-- Build: `gemini-3.5-flash-lite-20260728`
+- Build: `cloudflare-aig-byok-20260729`
 - Active Worker version: `5838041c-e79d-4ea3-81b2-9a6dcdb4a3b7` at 100% traffic
 - AI model: `gemini-3.5-flash-lite`
 - Runtime: `active`; `telegram-main` remains resumed and mutation-free
@@ -56,6 +56,7 @@ Non-secret Worker variables are checked into the selected Wrangler config, inclu
 
 Production secrets are stored with Wrangler and never committed:
 
+- `CF_AIG_TOKEN`
 - `GEMINI_API_KEY`
 - `OPENAI_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
@@ -64,6 +65,14 @@ Production secrets are stored with Wrangler and never committed:
 - `OPERATOR_SECRET`
 
 `TRIGGER_SECRET` and `OPERATOR_SECRET` must be distinct. `OPERATOR_KEY_ID` is a non-secret audit identity declared in both production configs.
+
+Production Gemini requests use Cloudflare AI Gateway BYOK when
+`CF_AIG_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `AI_GATEWAY_ID` are all present.
+The Google AI Studio key must be stored under the gateway's `default` provider
+key alias (or selected with `AI_GATEWAY_BYOK_ALIAS`). Provider request payloads
+are not logged and gateway response caching is bypassed. `GEMINI_API_KEY`
+remains available only as the direct-provider fallback when gateway config is
+completely absent.
 
 ## Custom Domain
 

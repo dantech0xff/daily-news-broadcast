@@ -50,7 +50,19 @@ function eInt(env, key, fallback) {
 function makeAI(env) {
   const provider = e(env, 'AI_PROVIDER', 'claude').toLowerCase();
   const keyEnv = PROVIDER_KEY_MAP[provider];
-  if (!['ollama'].includes(provider) && (!keyEnv || !env[keyEnv])) {
+  const isGemini = provider === 'gemini' || provider === 'google';
+  const gatewayValues = [
+    env.CF_AIG_TOKEN,
+    env.CLOUDFLARE_ACCOUNT_ID,
+    env.AI_GATEWAY_ID,
+  ];
+  const hasGatewayConfig = gatewayValues.some(value => String(value ?? '').trim());
+  const hasCompleteGatewayConfig = gatewayValues.every(value => String(value ?? '').trim());
+  const useGateway = isGemini && hasCompleteGatewayConfig;
+  if (isGemini && hasGatewayConfig && !hasCompleteGatewayConfig) {
+    throw new Error('Incomplete Cloudflare AI Gateway config: CF_AIG_TOKEN, CLOUDFLARE_ACCOUNT_ID, and AI_GATEWAY_ID are required');
+  }
+  if (!['ollama'].includes(provider) && !useGateway && (!keyEnv || !env[keyEnv])) {
     throw new Error(`Missing AI credential${keyEnv ? `: ${keyEnv}` : ` for provider ${provider}`}`);
   }
   if (provider === 'custom' && !env.CUSTOM_AI_BASE_URL) {
@@ -64,6 +76,12 @@ function makeAI(env) {
       ? e(env, 'OLLAMA_BASE_URL', undefined)
       : provider === 'custom' ? env.CUSTOM_AI_BASE_URL : undefined,
     name: provider === 'custom' ? e(env, 'CUSTOM_AI_NAME', undefined) : undefined,
+    gateway: useGateway ? {
+      token: env.CF_AIG_TOKEN,
+      accountId: env.CLOUDFLARE_ACCOUNT_ID,
+      gatewayId: env.AI_GATEWAY_ID,
+      byokAlias: e(env, 'AI_GATEWAY_BYOK_ALIAS', undefined),
+    } : undefined,
   });
 }
 

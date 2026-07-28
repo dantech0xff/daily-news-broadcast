@@ -5,7 +5,7 @@
 
 import { ClaudeAI } from './claude.js';
 import {
-  OpenAICompatibleAI, openai, groq, gemini, qwen,
+  OpenAICompatibleAI, openai, groq, gemini, geminiGateway, qwen,
   deepseek, ollama, openRouter, togetherAI,
 } from './openai-compat.js';
 
@@ -19,10 +19,11 @@ import {
  * @param {string} [config.apiKey]            - API key for the chosen provider
  * @param {string} [config.baseUrl]           - Custom base URL (for 'custom' provider)
  * @param {string} [config.name]              - Custom display name (for 'custom' provider)
+ * @param {Object} [config.gateway]           - Cloudflare AI Gateway BYOK config
  * @returns {import('../core/contracts.js').AIPlugin|null}
  */
 export function createAI(config) {
-  const { provider = 'claude', model, apiKey, baseUrl, name } = config;
+  const { provider = 'claude', model, apiKey, baseUrl, name, gateway } = config;
 
   switch (provider.toLowerCase()) {
     case 'none':
@@ -42,6 +43,12 @@ export function createAI(config) {
 
     case 'gemini':
     case 'google':
+      if (gateway) {
+        return geminiGateway({
+          ...gateway,
+          model: model || 'gemini-2.0-flash',
+        });
+      }
       return gemini(apiKey, model || 'gemini-2.0-flash');
 
     case 'qwen':

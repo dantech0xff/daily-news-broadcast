@@ -290,6 +290,38 @@ export function gemini(apiKey, model = 'gemini-2.0-flash') {
   });
 }
 
+/** Google Gemini via Cloudflare AI Gateway with a stored provider key (BYOK). */
+export function geminiGateway({
+  accountId,
+  gatewayId,
+  token,
+  model = 'gemini-2.0-flash',
+  byokAlias,
+  fetch,
+}) {
+  if (!String(accountId ?? '').trim()) throw new Error('Missing Cloudflare account ID');
+  if (!String(gatewayId ?? '').trim()) throw new Error('Missing Cloudflare AI Gateway ID');
+  if (!String(token ?? '').trim()) throw new Error('Missing Cloudflare AI Gateway token');
+
+  const gatewayModel = model.startsWith('google-ai-studio/')
+    ? model
+    : `google-ai-studio/${model}`;
+  return new OpenAICompatibleAI({
+    apiKey: token,
+    model: gatewayModel,
+    baseUrl: `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/v1`,
+    name: `Gemini via Cloudflare AI Gateway (${model})`,
+    extraHeaders: {
+      'cf-aig-gateway-id': gatewayId,
+      'cf-aig-collect-log': 'false',
+      'cf-aig-collect-log-payload': 'false',
+      'cf-aig-skip-cache': 'true',
+      ...(byokAlias ? { 'cf-aig-byok-alias': byokAlias } : {}),
+    },
+    ...(fetch && { fetch }),
+  });
+}
+
 /** Alibaba Qwen via DashScope OpenAI-compatible endpoint */
 export function qwen(apiKey, model = 'qwen-plus') {
   return new OpenAICompatibleAI({
