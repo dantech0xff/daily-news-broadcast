@@ -178,78 +178,148 @@ test('Telegram sanitizes provider errors and never exposes its destination or to
   assert.doesNotMatch(serialized, /super-secret-token/);
 });
 
-test('Telegram sends a long photo post as one rich message', async () => {
+test('Telegram sends a short news post as a standard photo caption', async () => {
   const transport = sequenceFetch([
     jsonResponse(200, { ok: true, result: { message_id: 50 } }),
   ]);
   const output = new TelegramOutput({ ...config, fetch: transport.fetch });
-  const content = `*Important*\n\n${'x'.repeat(1_500)}`;
+  const url = 'https://example.test/news';
+  const content = `*Important*\n\nA short summary. A second sentence.\n\n${url}`;
 
   const result = await output.send(content, {
-    article: { imageUrl: 'https://example.test/image.png' },
+    article: { imageUrl: 'https://example.test/image.png', url },
   });
 
   assertCanonicalResult(result, 'success', 'never');
   assert.equal(result.messageId, '50');
   assert.equal(result.meta.hasPhoto, true);
-  assert.equal(result.meta.parts, 1);
   assert.equal(transport.calls.length, 1);
-  assert.match(transport.calls[0].url, /\/sendRichMessage$/);
+  assert.match(transport.calls[0].url, /\/sendPhoto$/);
+  assert.doesNotMatch(transport.calls[0].url, /Rich/);
 
   const body = JSON.parse(transport.calls[0].init.body);
   assert.equal(body.chat_id, config.chatId);
-  assert.match(body.rich_message.markdown, /^!\[\]\(tg:\/\/photo\?id=article_image\)/);
-  assert.match(body.rich_message.markdown, /\*\*Important\*\*/);
-  assert.deepEqual(body.rich_message.media, [{
-    id: 'article_image',
-    media: { type: 'photo', media: 'https://example.test/image.png' },
-  }]);
+  assert.equal(body.photo, 'https://example.test/image.png');
+  assert.equal(body.caption, content);
+  assert.equal(body.parse_mode, 'Markdown');
 });
 
-test('Telegram retries rejected rich Markdown as one plain rich message', async () => {
+test('Telegram deterministically keeps a generated single-news caption concise', async () => {
   const transport = sequenceFetch([
-    jsonResponse(400, {
-      ok: false,
-      error_code: 400,
-      description: "Bad Request: can't parse rich message",
-    }),
     jsonResponse(200, { ok: true, result: { message_id: 51 } }),
   ]);
   const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+  const url = 'https://example.test/news';
 
-  const result = await output.send(`*Important*\n\n${'x'.repeat(1_500)}`, {
-    article: { imageUrl: 'https://example.test/image.png' },
+  const result = await output.send(`*Important*\n\n${'Long summary sentence. '.repeat(80)}\n\n${url}`, {
+    article: { imageUrl: 'https://example.test/image.png', url },
+  });
+
+  assertCanonicalResult(result, 'success', 'never');
+  assert.equal(transport.calls.length, 1);
+  assert.match(transport.calls[0].url, /\/sendPhoto$/);
+  const body = JSON.parse(transport.calls[0].init.body);
+  assert.ok(body.caption.length <= 700);
+  assert.match(body.caption, /\n\nhttps:\/\/example\.test\/news$/);
+});
+
+test('Telegram limits a generated news summary to three sentences', async () => {
+  const transport = sequenceFetch([
+    jsonResponse(200, { ok: true, result: { message_id: 52 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+  const url = 'https://example.test/news';
+
+  await output.send(`*Important*\n\nOne. Two. Three. Four. Five.\n\n${url}`, {
+    article: { imageUrl: 'https://example.test/image.png', url },
+  });
+
+  const body = JSON.parse(transport.calls[0].init.body);
+  assert.equal(body.caption, `*Important*\n\nOne. Two. Three.\n\n${url}`);
+});
+
+test('Telegram limits an inline generated news summary to three sentences', async () => {
+  const transport = sequenceFetch([
+    jsonResponse(200, { ok: true, result: { message_id: 53 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+  const url = 'https://example.test/news';
+
+  await output.send(`*Important* One. Two. Three. Four.\n\n${url}`, {
+    article: { imageUrl: 'https://example.test/image.png', url },
+  });
+
+  const body = JSON.parse(transport.calls[0].init.body);
+  assert.equal(body.caption, `*Important*\n\nOne. Two. Three.\n\n${url}`);
+});
+
+test('Telegram preserves long source URLs and cleans markdown link wrappers', async () => {
+  const longUrl = `https://example.test/${'x'.repeat(690)}`;
+  const transport = sequenceFetch([
+    jsonResponse(200, { ok: true, result: { message_id: 54 } }),
+    jsonResponse(200, { ok: true, result: { message_id: 55 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+
+  await output.send(`*Important*\n\nOne sentence. Second sentence.\n\n[source](${longUrl})`, {
+    article: { imageUrl: 'https://example.test/image.png', url: longUrl },
+  });
+
+  assert.equal(transport.calls.length, 2);
+  assert.match(transport.calls[0].url, /\/sendPhoto$/);
+  assert.equal(JSON.parse(transport.calls[0].init.body).caption, undefined);
+  const textBody = JSON.parse(transport.calls[1].init.body);
+  assert.ok(textBody.text.endsWith(longUrl));
+  assert.equal(textBody.text.includes('[source]()'), false);
+  assert.equal(textBody.text.includes('[source]'), false);
+});
+
+test('Telegram keeps an oversized source URL intact in the standard photo-plus-text flow', async () => {
+  const longUrl = `https://example.test/${'x'.repeat(1_500)}`;
+  const transport = sequenceFetch([
+    jsonResponse(200, { ok: true, result: { message_id: 56 } }),
+    jsonResponse(200, { ok: true, result: { message_id: 57 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+
+  const result = await output.send(`*Important*\n\nOne sentence. Second sentence.\n\n${longUrl}`, {
+    article: { imageUrl: 'https://example.test/image.png', url: longUrl },
+  });
+
+  assertCanonicalResult(result, 'success', 'never');
+  assert.equal(result.meta.parts, 2);
+  assert.match(transport.calls[0].url, /\/sendPhoto$/);
+  assert.match(transport.calls[1].url, /\/sendMessage$/);
+  assert.equal(JSON.parse(transport.calls[0].init.body).caption, undefined);
+  assert.ok(JSON.parse(transport.calls[1].init.body).text.endsWith(longUrl));
+});
+
+test('Telegram sends an unexpectedly long photo post as standard photo plus text', async () => {
+  const transport = sequenceFetch([
+    jsonResponse(200, { ok: true, result: { message_id: 51 } }),
+    jsonResponse(200, { ok: true, result: { message_id: 52 } }),
+  ]);
+  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
+  const content = `*Important*\n\n${'x'.repeat(1_500)}`;
+
+  const result = await output.send(content, {
+    articles: [{ imageUrl: 'https://example.test/image.png' }],
   });
 
   assertCanonicalResult(result, 'success', 'never');
   assert.equal(result.messageId, '51');
-  assert.equal(result.meta.parts, 1);
-  assert.equal(result.meta.fallbackAttempted, true);
+  assert.equal(result.meta.parts, 2);
+  assert.deepEqual(result.meta.successfulMessageIds, ['51', '52']);
+  assert.equal(result.meta.richMessageAttempted, undefined);
   assert.equal(transport.calls.length, 2);
-  assert.match(transport.calls[1].url, /\/sendRichMessage$/);
+  assert.match(transport.calls[0].url, /\/sendPhoto$/);
+  assert.match(transport.calls[1].url, /\/sendMessage$/);
+  assert.equal(transport.calls.some(call => /sendRichMessage/.test(call.url)), false);
 
-  const fallbackBody = JSON.parse(transport.calls[1].init.body);
-  assert.deepEqual(fallbackBody.rich_message.blocks[0], {
-    type: 'photo',
-    photo: { type: 'photo', media: 'https://example.test/image.png' },
-  });
-  assert.match(fallbackBody.rich_message.blocks[1].text, /^Important/);
-});
-
-test('Telegram never falls back after an ambiguous rich-message response', async () => {
-  const transport = sequenceFetch([
-    jsonResponse(500, { ok: false, description: 'upstream error' }),
-    jsonResponse(200, { ok: true, result: { message_id: 52 } }),
-  ]);
-  const output = new TelegramOutput({ ...config, fetch: transport.fetch });
-
-  const result = await output.send('x'.repeat(1_500), {
-    article: { imageUrl: 'https://example.test/image.png' },
-  });
-
-  assertCanonicalResult(result, 'ambiguous', 'manual');
-  assert.equal(result.meta.richMessageAttempted, true);
-  assert.equal(transport.calls.length, 1);
+  const photoBody = JSON.parse(transport.calls[0].init.body);
+  assert.equal(photoBody.photo, 'https://example.test/image.png');
+  assert.equal(photoBody.caption, undefined);
+  assert.equal(JSON.parse(transport.calls[1].init.body).text, content);
 });
 
 test('Telegram photo fallback is blocked after uncertainty and long-photo flows stop on failure', async () => {
@@ -267,7 +337,6 @@ test('Telegram photo fallback is blocked after uncertainty and long-photo flows 
   assert.equal(uncertainPhoto.calls.length, 1);
 
   const partialPhoto = sequenceFetch([
-    jsonResponse(404, { ok: false, error_code: 404, description: 'Not Found' }),
     jsonResponse(200, { ok: true, result: { message_id: 61 } }),
     jsonResponse(400, { ok: false, error_code: 400, description: 'text rejected' }),
     jsonResponse(200, { ok: true, result: { message_id: 63 } }),
@@ -275,12 +344,12 @@ test('Telegram photo fallback is blocked after uncertainty and long-photo flows 
   const partialOutput = new TelegramOutput({ ...config, fetch: partialPhoto.fetch });
 
   const partial = await partialOutput.send('x'.repeat(1500), {
-    article: { imageUrl: 'https://example.test/image.png' },
+    articles: [{ imageUrl: 'https://example.test/image.png' }],
   });
 
   assertCanonicalResult(partial, 'ambiguous', 'manual');
   assert.equal(partial.messageId, '61');
   assert.deepEqual(partial.meta.successfulMessageIds, ['61']);
-  assert.equal(partial.meta.richMessageAttempted, true);
-  assert.equal(partialPhoto.calls.length, 3);
+  assert.equal(partial.meta.richMessageAttempted, undefined);
+  assert.equal(partialPhoto.calls.length, 2);
 });

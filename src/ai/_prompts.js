@@ -166,9 +166,12 @@ export function buildHookPrompt(article, options = {}) {
   const { platform = 'telegram', style = 'digest', audience = 'người làm IT Việt Nam' } = options;
   const meta = article.meta || {};
   const today = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
-  const spicy = style === 'hot_take';
+  const telegramSummary = platform === 'telegram';
+  const spicy = style === 'hot_take' && !telegramSummary;
 
-  const openers = spicy ? [
+  const openers = telegramSummary ? [
+    'Bắt đầu bằng một tiêu đề ngắn phản ánh đúng nội dung article',
+  ] : spicy ? [
     'Mở đầu bằng nhận định cụ thể rút trực tiếp từ article',
     'Mở đầu bằng tradeoff thật với team IT hoặc tổ chức kỹ thuật',
     'Mở đầu bằng câu hỏi ngắn gắn với dữ kiện trong article',
@@ -192,7 +195,13 @@ GÓC NHÌN:
 - Cân bằng và fair. Đừng diễn "hot take" nếu article chỉ có thông tin đơn giản.
 - Nói rõ tradeoff thật với ngành IT: cost, lock-in, reliability, security, DX, operations, product impact.
 - Không thiên vị một vai trò, công nghệ, vendor, hay hướng triển khai.`
-    : `Viết 1 post tóm tắt bài tech news bên dưới cho ${audience}.
+    : telegramSummary
+      ? `Viết 1 post tóm tắt ngắn bài tech news bên dưới cho ${audience}.
+
+${VIETNAMESE_VOICE}
+
+Chỉ tóm tắt thông tin trong article. Không thêm viewpoint, opinion, câu hỏi thảo luận hoặc phân tích dài.`
+      : `Viết 1 post tóm tắt bài tech news bên dưới cho ${audience}.
 
 ${VIETNAMESE_VOICE}
 
@@ -201,7 +210,10 @@ ${VIETNAMESE_VOICE}
   const structure = spicy
     ? `CẤU TRÚC 1 ĐOẠN:
 Nhận định cụ thể → chuyện gì xảy ra → tradeoff/điều team IT nên kiểm chứng → câu hỏi nếu tự nhiên. Đừng ép đủ mọi phần; ưu tiên mạch đọc như người. (3-5 câu)`
-    : `CẤU TRÚC 1 ĐOẠN:
+    : telegramSummary
+      ? `CẤU TRÚC NGẮN:
+Tiêu đề → đúng 2-3 câu tóm tắt chuyện gì xảy ra và chi tiết chính → link nguồn. Viết gọn, dễ hiểu, giữ thuật ngữ tech tiếng Anh.`
+      : `CẤU TRÚC 1 ĐOẠN:
 Chuyện gì đang xảy ra → chi tiết đáng chú ý → implication ngắn nếu có. Viết gọn, dễ hiểu, giữ thuật ngữ tech tiếng Anh. (3-5 câu)`;
 
   const system = `${editorialMode}
@@ -294,4 +306,12 @@ export function buildPrompt(articles, options = {}) {
     system: `${VIETNAMESE_OUTPUT_RULES}\n\n${systemPrompt}\n\n${SOURCE_DATA_RULES}\n\n${platformRules}`,
     user: `Hôm nay là ${today}.\n\nĐây là danh sách bài viết:\n\n${articleList}\n\nHãy tạo nội dung bằng tiếng Việt có dấu đầy đủ.`,
   };
+}
+
+/** Select the prompt contract that matches the engine delivery mode. */
+export function buildPromptForDelivery(articles, options = {}) {
+  if (options.deliveryMode === 'drip' && articles.length === 1) {
+    return buildHookPrompt(articles[0], options);
+  }
+  return buildPrompt(articles, options);
 }

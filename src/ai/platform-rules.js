@@ -46,21 +46,22 @@ export const HOOK_RULES = {
   telegram: {
     format: `QUY TẮC:
 - Vietnglish tự nhiên, xen tiếng Anh như người làm IT Việt chat hàng ngày
-- CHỈ 1 đoạn, có thể có viewpoint nhẹ nếu có dữ kiện trong article
-- Tổng khoảng 300-500 ký tự
+- Dòng đầu là tiêu đề bài viết, dùng *bold*
+- Sau tiêu đề là đúng 2-3 câu ngắn chỉ tóm tắt thông tin chính; không viết phân tích dài hoặc hot take
+- Tổng nội dung không quá 700 ký tự để vừa một Telegram photo caption
 - Link gốc ở cuối, paste thẳng URL
-- Dòng cuối cùng luôn là "— Dan Tech Daily News"
-- Emoji: tối đa 3 cái hoặc không, đừng spam
-- Dùng *bold* cho keyword quan trọng, 1-2 chỗ thôi
+- Emoji: tối đa 1 cái hoặc không
+- Ngoài tiêu đề, không lạm dụng *bold*
 - KHÔNG bắt đầu bằng emoji, KHÔNG dùng ## headers
 - Tránh mở bài kiểu template: "Trong bối cảnh...", "Điều này quan trọng vì...", "Đây có thể là bước ngoặt..."`,
     examples: `VÍ DỤ TONE ĐÚNG (học cách viết, KHÔNG copy):
 
 ---
-Cloudflare vừa giới thiệu *Agent Lee*. Điểm đáng chú ý không phải cái tên, mà là việc họ kéo Workers, KV, D1, R2 vào cùng một flow cho AI agents trên edge. Với team đang cân nhắc AI infrastructure, câu hỏi thực tế là nó giảm được bao nhiêu glue code và vận hành.
+*Cloudflare giới thiệu Agent Lee cho AI agents trên edge*
+
+Agent Lee gom Workers, KV, D1 và R2 vào cùng một flow triển khai AI agents. Cách tiếp cận này giúp team giảm phần glue code khi xây dựng trên Cloudflare stack.
 
 https://blog.cloudflare.com/introducing-agent-lee/
-— Dan Tech Daily News
 ---`,
   },
 

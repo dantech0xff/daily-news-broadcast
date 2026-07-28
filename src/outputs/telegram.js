@@ -18,7 +18,7 @@ import {
 } from './telegram-client.js';
 
 const CAPTION_MAX = 1024;
-const RICH_MEDIA_ID = 'article_image';
+const NEWS_CAPTION_MAX = 700;
 
 export class TelegramOutput extends OutputPlugin {
   /**
@@ -70,7 +70,15 @@ export class TelegramOutput extends OutputPlugin {
       || null;
 
     if (imageUrl) {
-      return this._sendWithPhoto(content, imageUrl, options.signal);
+      const photoContent = options.article
+        ? fitNewsCaption(content, options.article.url, NEWS_CAPTION_MAX)
+        : content;
+      return this._sendWithPhoto(
+        photoContent,
+        imageUrl,
+        options.signal,
+        options.article ? NEWS_CAPTION_MAX : CAPTION_MAX,
+      );
     }
 
     return this._sendTextOnly(content, options.signal);
@@ -130,8 +138,8 @@ export class TelegramOutput extends OutputPlugin {
     });
   }
 
-  async _sendWithPhoto(content, imageUrl, signal) {
-    if (content.length <= CAPTION_MAX) {
+  async _sendWithPhoto(content, imageUrl, signal, captionMax = CAPTION_MAX) {
+    if (content.length <= captionMax) {
       const result = await this._sendPhoto(imageUrl, content, signal);
       if (result.success) {
         return successResult(result.messageId, {
@@ -160,31 +168,6 @@ export class TelegramOutput extends OutputPlugin {
       };
     }
 
-    const richResult = await this._sendRichPhoto(imageUrl, content, signal);
-    if (richResult.success) {
-      return successResult(richResult.messageId, {
-        ...richResult.meta,
-        parts: 1,
-        partsAttempted: 1,
-        partsTotal: 1,
-        hasPhoto: true,
-        richMessageAttempted: true,
-        successfulMessageIds: richResult.messageId ? [richResult.messageId] : [],
-        partResults: [partResult(1, richResult, 'rich_message')],
-      });
-    }
-
-    if (!isDefinitiveContentRejection(richResult)) {
-      return {
-        ...richResult,
-        meta: {
-          ...richResult.meta,
-          photoAttempted: true,
-          richMessageAttempted: true,
-        },
-      };
-    }
-
     const messages = splitSmart(content, this.maxLength);
     const totalSteps = messages.length + 1;
     const photoResult = await this._sendPhoto(imageUrl, null, signal);
@@ -198,7 +181,6 @@ export class TelegramOutput extends OutputPlugin {
             ...fallback.meta,
             fallbackAttempted: true,
             photoAttempted: true,
-            richMessageAttempted: true,
             hasPhoto: false,
           },
         };
@@ -213,7 +195,6 @@ export class TelegramOutput extends OutputPlugin {
           partsTotal: totalSteps,
           failedAt: 1,
           photoAttempted: true,
-          richMessageAttempted: true,
           partResults: [partResult(1, photoResult, 'photo')],
         },
       };
@@ -221,7 +202,7 @@ export class TelegramOutput extends OutputPlugin {
 
     const successfulMessageIds = photoResult.messageId ? [photoResult.messageId] : [];
     const partResults = [partResult(1, photoResult, 'photo')];
-    let fallbackAttempted = true;
+    let fallbackAttempted = false;
     await this._dependencies.sleep(300);
 
     for (let i = 0; i < messages.length; i++) {
@@ -248,7 +229,6 @@ export class TelegramOutput extends OutputPlugin {
           meta: {
             ...partial.meta,
             hasPhoto: true,
-            richMessageAttempted: true,
             ...(fallbackAttempted ? { fallbackAttempted: true } : {}),
           },
         };
@@ -263,40 +243,10 @@ export class TelegramOutput extends OutputPlugin {
       partsAttempted: totalSteps,
       partsTotal: totalSteps,
       hasPhoto: true,
-      richMessageAttempted: true,
       successfulMessageIds,
       partResults,
       ...(fallbackAttempted ? { fallbackAttempted: true } : {}),
     });
-  }
-
-  async _sendRichPhoto(photoUrl, content, signal) {
-    const body = {
-      chat_id: this._config.chatId,
-      rich_message: {
-        markdown: `![](tg://photo?id=${RICH_MEDIA_ID})\n\n${toRichMarkdown(content)}`,
-        media: [{
-          id: RICH_MEDIA_ID,
-          media: { type: 'photo', media: photoUrl },
-        }],
-      },
-      disable_notification: this._config.silent,
-    };
-
-    const result = await this._request('sendRichMessage', body, signal);
-    if (result.success || !isDefinitiveFormatRejection(result)) return result;
-
-    body.rich_message = {
-      blocks: [
-        { type: 'photo', photo: { type: 'photo', media: photoUrl } },
-        { type: 'paragraph', text: stripMarkdown(content) },
-      ],
-    };
-    const fallback = await this._request('sendRichMessage', body, signal);
-    return {
-      ...fallback,
-      meta: { ...fallback.meta, fallbackAttempted: true },
-    };
   }
 
   async _sendPhoto(photoUrl, caption, signal) {
@@ -447,6 +397,57 @@ function stripMarkdown(text) {
     .replace(/`([^`]+)`/g, '$1');
 }
 
-function toRichMarkdown(text) {
-  return text.replace(/(?<![\\*])\*([^*\n]+)\*(?!\*)/g, '**$1**');
+function fitNewsCaption(content, sourceUrl, maxLength) {
+  const url = String(sourceUrl ?? '').trim();
+  const text = String(content ?? '').trim();
+  if (!url) return text;
+  const bodyWithoutUrl = url ? removeSourceUrl(text, url) : text;
+  const body = limitNewsSummarySentences(bodyWithoutUrl)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const suffix = url ? `\n\n${url}` : '';
+  if (`${body}${suffix}`.length <= maxLength) return `${body}${suffix}`;
+
+  const available = maxLength - suffix.length;
+  if (available <= 1) return `${body}${suffix}`;
+
+  let clipped = body.substring(0, available - 1).trimEnd();
+  const sentenceBoundary = Math.max(
+    clipped.lastIndexOf('. '),
+    clipped.lastIndexOf('! '),
+    clipped.lastIndexOf('? '),
+    clipped.lastIndexOf('\n\n'),
+  );
+  if (sentenceBoundary >= Math.floor(available * 0.55)) {
+    clipped = clipped.substring(0, sentenceBoundary + 1).trimEnd();
+  }
+  if (!/[.!?…]$/.test(clipped)) clipped = `${clipped}…`;
+  return `${clipped.substring(0, available)}${suffix}`;
+}
+
+function removeSourceUrl(text, url) {
+  const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text
+    .replace(new RegExp(`\\[[^\\]]*\\]\\(${escapedUrl}\\)`, 'g'), '')
+    .split(url)
+    .join('');
+}
+
+function limitNewsSummarySentences(body) {
+  const lines = body.split('\n').map(line => line.trim()).filter(Boolean);
+  let title;
+  let summary;
+  if (lines.length >= 2) {
+    [title] = lines;
+    summary = lines.slice(1).join(' ');
+  } else {
+    const inline = body.trim().match(/^(\*[^*]+\*)\s+(.+)$/s);
+    if (!inline) return body;
+    [, title, summary] = inline;
+  }
+  const sentences = summary.match(/[^.!?…]+(?:[.!?…]+|$)/gu)
+    ?.map(sentence => sentence.trim())
+    .filter(Boolean) ?? [];
+  if (sentences.length <= 3) return `${title}\n\n${summary}`;
+  return `${title}\n\n${sentences.slice(0, 3).join(' ')}`;
 }
