@@ -884,6 +884,61 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
     });
   });
 
+  it('does not forward a null article limit for an ordinary force request', async () => {
+    const channelId = 'ordinary-force-without-limit-channel';
+    const requestId = 'ordinary-force-without-limit-request';
+    const stub = coordinator(channelId);
+
+    await runInDurableObject(stub, async instance => {
+      await instance._ensureIdentity(channelId);
+      const machine = instance._machine(channelId);
+      const channel = await machine.getChannelState();
+      if (channel.paused) {
+        await machine.setPaused(false, {
+          expectedVersion: channel.version,
+          idempotencyKey: 'resume-before-ordinary-force',
+          operatorId: 'fixture-operator',
+          reason: 'exercise ordinary force without an article limit',
+        });
+      }
+
+      const originalRunRequest = instance.runRequest.bind(instance);
+      instance.runRequest = async () => null;
+      await instance.acceptRequest({
+        requestId,
+        channelId,
+        triggerType: 'force',
+        operatorId: 'fixture-operator',
+        reason: 'exercise ordinary force without an article limit',
+        duplicateRiskAccepted: true,
+        requestedAt: '2026-07-20T00:00:00.000Z',
+      });
+
+      let receivedOptions;
+      instance._findChannel = () => ({ id: channelId, output: OUTPUT, mode: 'drip' });
+      instance._buildEngine = () => ({
+        async runDrip(options) {
+          receivedOptions = options;
+          return {
+            status: 'skipped',
+            reason: 'offline-force-fixture',
+            stats: { articles: 0, outputs: 0 },
+          };
+        },
+      });
+      instance.runRequest = originalRunRequest;
+
+      await instance.runRequest(requestId);
+
+      expect(receivedOptions.articleLimit).toBeUndefined();
+      expect(await instance.getRequest({ channelId, requestId })).toMatchObject({
+        state: 'completed',
+        outcome: 'skipped',
+        reason: 'offline-force-fixture',
+      });
+    });
+  });
+
   it('accepts a canary only while paused and records a bounded operator audit', async () => {
     const channelId = 'audited-canary-channel';
     const stub = coordinator(channelId);

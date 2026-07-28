@@ -197,7 +197,7 @@ export class ChannelDeliveryCoordinator extends DurableObject {
         operatorForce: request.operatorForce,
         confirmPausedMutation: request.confirmPausedMutation,
         singleMutation: request.singleMutation,
-        articleLimit: request.limit,
+        articleLimit: request.limit ?? undefined,
       };
       result = channel.mode === 'drip'
         ? await engine.runDrip({ ...options, batchSize: request.singleMutation ? 1 : channel.batchSize || 5, delayMs: channel.delayMs ?? 0 })
