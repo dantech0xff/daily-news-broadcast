@@ -203,7 +203,14 @@ export class ChannelDeliveryCoordinator extends DurableObject {
         ? await engine.runDrip({ ...options, batchSize: request.singleMutation ? 1 : channel.batchSize || 5, delayMs: channel.delayMs ?? 0 })
         : await engine.run(options);
     } catch (error) {
-      result = { status: 'failed', reason: 'coordinator_error', error: sanitizeError(error) };
+      const sanitizedError = sanitizeError(error);
+      console.error('[Coordinator] Request failed', {
+        requestId,
+        channelId: request.channelId,
+        triggerType: request.triggerType,
+        error: sanitizedError,
+      });
+      result = { status: 'failed', reason: 'coordinator_error', error: sanitizedError };
     }
 
     const projected = projectRunResult(result);
