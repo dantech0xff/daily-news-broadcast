@@ -65,7 +65,7 @@ Force semantics are explicit:
 - Sources fetch into a bounded article set, then middlewares can score or filter it.
 - AI summarizes the selected articles using the configured language, style, audience, and platform rules.
 - Outputs are processed one at a time in configured topology order.
-- Telegram photo posts use one rich message when the text exceeds the classic 1,024-character photo-caption limit; definitively unsupported Bot API versions fall back to the legacy photo-plus-text flow.
+- Telegram single-article news posts use a short standard photo caption, target 2–3 summary sentences, and preserve the full source link. Normal captions are capped at 700 characters; links or image content that cannot fit a Telegram caption use the standard photo-plus-text flow. Rich messages are not used.
 - After each output send, the state machine commits the result before the next output starts.
 - Failures become classified states such as retryable, manual-retry-required, ambiguous, or exhausted.
 - Drip mode persists a day batch, can carry unresolved items across days, and supports one bounded refill when source health allows it.
