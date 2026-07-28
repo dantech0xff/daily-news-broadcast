@@ -307,12 +307,11 @@ export function geminiGateway({
     ? model
     : `google-ai-studio/${model}`;
   return new OpenAICompatibleAI({
-    apiKey: token,
     model: gatewayModel,
-    baseUrl: `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/v1`,
+    baseUrl: `https://gateway.ai.cloudflare.com/v1/${encodeURIComponent(accountId)}/${encodeURIComponent(gatewayId)}/compat`,
     name: `Gemini via Cloudflare AI Gateway (${model})`,
     extraHeaders: {
-      'cf-aig-gateway-id': gatewayId,
+      'cf-aig-authorization': `Bearer ${token}`,
       'cf-aig-collect-log': 'false',
       'cf-aig-collect-log-payload': 'false',
       'cf-aig-skip-cache': 'true',

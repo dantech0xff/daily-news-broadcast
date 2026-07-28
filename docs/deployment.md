@@ -8,7 +8,7 @@ The Worker is promoted in stages. Production is currently on the post-lifecycle 
 
 Current incident state (2026-07-29):
 
-- Build: `cloudflare-aig-byok-20260729`
+- Build: `cloudflare-aig-compat-byok-20260729`
 - Active Worker version: `5838041c-e79d-4ea3-81b2-9a6dcdb4a3b7` at 100% traffic
 - AI model: `gemini-3.5-flash-lite`
 - Runtime: `active`; `telegram-main` remains resumed and mutation-free

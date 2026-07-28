@@ -33,10 +33,10 @@ test('Gemini gateway uses Cloudflare auth and stored BYOK without a provider key
 
   assert.equal(
     request.url,
-    'https://api.cloudflare.com/client/v4/accounts/account%2Fid/ai/v1/chat/completions',
+    'https://gateway.ai.cloudflare.com/v1/account%2Fid/news-engine/compat/chat/completions',
   );
-  assert.equal(request.init.headers.Authorization, 'Bearer cf-token');
-  assert.equal(request.init.headers['cf-aig-gateway-id'], 'news-engine');
+  assert.equal(request.init.headers.Authorization, undefined);
+  assert.equal(request.init.headers['cf-aig-authorization'], 'Bearer cf-token');
   assert.equal(request.init.headers['cf-aig-collect-log'], 'false');
   assert.equal(request.init.headers['cf-aig-collect-log-payload'], 'false');
   assert.equal(request.init.headers['cf-aig-skip-cache'], 'true');

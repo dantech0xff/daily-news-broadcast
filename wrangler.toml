@@ -20,7 +20,7 @@ type = "durable-object"
 storage = "sqlite"
 
 [vars]
-BUILD_VERSION = "cloudflare-aig-byok-20260729"
+BUILD_VERSION = "cloudflare-aig-compat-byok-20260729"
 NEWS_RUNTIME_MODE = "bootstrap"
 NEWS_DEFAULT_PAUSED = "true"
 TOKEN_MAINTENANCE_MODE = "disabled"
