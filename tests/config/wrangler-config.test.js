@@ -14,6 +14,7 @@ test('quiesce and final configs target the same worker/runtime/KV/triggers', () 
   assert.equal(kvBinding(quiesce), kvBinding(production));
   assert.equal(setting(quiesce, 'OPERATOR_KEY_ID'), setting(production, 'OPERATOR_KEY_ID'));
   assert.equal(setting(production, 'OPERATOR_KEY_ID'), '"operator-main"');
+  assert.equal(setting(quiesce, 'AI_MODEL'), setting(production, 'AI_MODEL'));
 });
 
 test('quiesce is reversible pre-lifecycle and hard-disables both writers', () => {
@@ -31,7 +32,8 @@ test('final config declares SQLite coordinator in bootstrap and paused mode', ()
   assert.match(production, /NEWS_RUNTIME_MODE\s*=\s*"bootstrap"/);
   assert.match(production, /NEWS_DEFAULT_PAUSED\s*=\s*"true"/);
   assert.match(production, /TOKEN_MAINTENANCE_MODE\s*=\s*"disabled"/);
-  assert.equal(setting(production, 'BUILD_VERSION'), '"delivery-v2-20260721-ff308d5"');
+  assert.equal(setting(production, 'BUILD_VERSION'), '"gemini-3.5-flash-lite-20260728"');
+  assert.equal(setting(production, 'AI_MODEL'), '"gemini-3.5-flash-lite"');
 });
 
 test('active-paused config changes only the runtime gate from the bootstrap artifact', () => {
