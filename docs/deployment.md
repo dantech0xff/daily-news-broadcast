@@ -4,18 +4,19 @@
 
 Production URL: <https://news-engine.dan-tran.workers.dev>
 
-The Worker is promoted in stages. Production is currently on the post-lifecycle `active` runtime with the Telegram coordinator resumed. The SQLite Durable Object lifecycle, legacy KV import, one-message canary, and explicit per-channel resume are complete. Standard Telegram photo captions are deployed; provider-level verification will occur on the next scheduled news item. Token maintenance remains disabled until separately approved.
+The Worker is promoted in stages. Production is currently on the post-lifecycle `active` runtime with the Telegram coordinator resumed. The SQLite Durable Object lifecycle, legacy KV import, one-message canary, and explicit per-channel resume are complete. Gemini generation through Cloudflare AI Gateway BYOK and the standard Telegram photo-caption delivery path are verified in production. Token maintenance remains disabled until separately approved.
 
 Current incident state (2026-07-29):
 
 - Build: `cloudflare-aig-compat-byok-20260729`
-- Active Worker version: `5838041c-e79d-4ea3-81b2-9a6dcdb4a3b7` at 100% traffic
+- Active Worker artifact: `cloudflare-aig-compat-byok-20260729` at 100% traffic
 - AI model: `gemini-3.5-flash-lite`
 - Runtime: `active`; `telegram-main` remains resumed and mutation-free
 - Health: `200 OK`
-- AI preview: `500 internal_error`; the provider request remains classified as HTTP 400
-- Queue: 21 total, 21 remaining, 18 blocked in `generation_exhausted`
-- No backlog recovery action has been issued
+- AI Gateway: provider `google-ai-studio`, BYOK alias `default`; generation retry `ca8f38db39870f046c9050623bba2b7b7e8e96979d6575d7ef61c14596a27f9f` completed `success/generation_ready`
+- Telegram delivery: repair alarm `f315b2be5a40fa1506c3b41cba0ae8ad6c1200a52de750f708fe7cf0fc11a1f6` completed `success` with `articles=1`, `outputs=1`
+- Queue: 24 total, 23 remaining, 22 blocked; one item is `delivered`
+- Safety: zero ambiguous outputs and zero maintenance dead letters
 
 Previous verified delivery state (2026-07-21):
 
@@ -86,13 +87,13 @@ curl --fail-with-body --silent --show-error \
 npx wrangler deployments status --config wrangler.toml --json
 ```
 
-`/health` must report `status: "ok"`, `runtimeMode: "active"`, and build `gemini-3.5-flash-lite-20260728`. Protected status currently reports `paused=false`, `mutationState=free`, channel version `195`, zero ambiguous outputs, zero maintenance dead letters, and 18 unresolved generation targets. Delivery recovery is not verified until AI preview succeeds and the blocked backlog is explicitly reconciled.
+`/health` must report `status: "ok"`, `runtimeMode: "active"`, and build `cloudflare-aig-compat-byok-20260729`. Protected status currently reports `paused=false`, `mutationState=free`, channel version `197`, zero ambiguous outputs, zero maintenance dead letters, and 22 unresolved generation targets. The verified recovery moved delivery `7cc7878559638127d33d5fc8647b0a0960a237eb6f242335e390d5bedf716fa2` from `generation_exhausted` to `ready`, after which the repair alarm completed one article and one output.
 
 The approved canary request is `711970696f57497e948441831451f94eea1ea004ba8fcd4ef3a29f1b64c80a59`. Its terminal evidence is `completed/success`, delivery `30a1346a6862c7a2681b90828b52549d6df0875f1329592a8151c7a5a88eb20b`, with `articles=1` and `outputs=1`. Confirmation was read-only; no second canary POST was issued.
 
 Resume completed at `2026-07-21T03:41:57Z` with the exact canary-era executable contract. Independent verification showed the intended 11-item queue unchanged immediately afterward, so it waits for scheduled delivery instead of draining during resume.
 
-Historical note: the superseded rich-message transport was verified with one ordinary authenticated manual trigger, not an operator force. Request `86e1f2aaa04787a5a7d6fec7c526a9a38290504de45556c30c952ef148424c1c` completed `success` with one article and one output at `2026-07-21T07:54:50.911Z`. This evidence does not verify the current standard photo-caption transport, which still requires an approved deployment check.
+Historical note: the superseded rich-message transport was verified with one ordinary authenticated manual trigger, not an operator force. Request `86e1f2aaa04787a5a7d6fec7c526a9a38290504de45556c30c952ef148424c1c` completed `success` with one article and one output at `2026-07-21T07:54:50.911Z`. The current standard photo-caption transport is separately verified by the 2026-07-29 AI Gateway recovery evidence above.
 
 ## Rollback
 
