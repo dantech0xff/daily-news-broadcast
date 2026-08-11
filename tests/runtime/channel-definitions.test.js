@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { defineChannels, validateChannels } from '../../src/channels/definitions.js';
+import { aiMLBlogs, aiNewsSources } from '../../src/presets/index.js';
 
 function validChannel(overrides = {}) {
   return {
@@ -14,6 +15,32 @@ test('channel definitions fail missing AI credentials before runtime delivery', 
   assert.throws(() => defineChannels({
     TELEGRAM_BOT_TOKEN: 'token', TELEGRAM_CHAT_ID: 'destination', AI_PROVIDER: 'claude',
   }), /ANTHROPIC_API_KEY/);
+});
+
+test('Telegram defaults use a broad set of recognized AI sources', () => {
+  const [channel] = defineChannels({
+    TELEGRAM_BOT_TOKEN: 'token', TELEGRAM_CHAT_ID: 'destination', ANTHROPIC_API_KEY: 'key',
+  });
+  const sourceIds = channel.sources.map(source => source.id);
+
+  assert.equal(sourceIds.length, 34);
+  assert.equal(new Set(sourceIds).size, sourceIds.length);
+  for (const sourceId of [
+    'openai', 'deepmind', 'huggingface',
+    'wired-ai', 'mit-tech-review-ai', 'ieee-spectrum-ai',
+  ]) {
+    assert.ok(sourceIds.includes(sourceId), `missing default source: ${sourceId}`);
+  }
+  assert.ok(!sourceIds.includes('simonwillison'));
+});
+
+test('official AI feed configs remain isolated across preset instances', () => {
+  const mlOpenAI = aiMLBlogs().find(source => source.id === 'openai');
+  const newsOpenAI = aiNewsSources().find(source => source.id === 'openai');
+
+  assert.notStrictEqual(mlOpenAI._config, newsOpenAI._config);
+  mlOpenAI._config.feedUrl = 'https://example.com/changed-feed.xml';
+  assert.equal(newsOpenAI._config.feedUrl, 'https://openai.com/blog/rss.xml');
 });
 
 test('X channel fails closed without a stable authenticated destination identity', () => {
