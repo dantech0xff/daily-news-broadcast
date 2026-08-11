@@ -63,6 +63,7 @@ Force semantics are explicit:
 ## Delivery Model
 
 - Sources fetch into a bounded article set, then middlewares can score or filter it.
+- The default Telegram mix combines official AI labs, established technology publications, engineering blogs, community discovery, and curated deep dives. The [preset factories](./src/presets/index.js) and [channel definitions](./src/channels/definitions.js) own the current inventory.
 - AI summarizes the selected articles using the configured language, style, audience, and platform rules.
 - Outputs are processed one at a time in configured topology order.
 - Telegram single-article news posts use a short standard photo caption, target 2–3 summary sentences, and preserve the full source link. Normal captions are capped at 700 characters; links or image content that cannot fit a Telegram caption use the standard photo-plus-text flow. Rich messages are not used.
