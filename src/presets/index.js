@@ -9,6 +9,16 @@ import { RedditSource } from '../sources/reddit.js';
 import { DevToSource } from '../sources/devto.js';
 import { GitHubTrendingSource } from '../sources/github-trending.js';
 
+const OFFICIAL_AI_FEEDS = [
+  { id: 'openai',      name: 'OpenAI Blog',       feedUrl: 'https://openai.com/blog/rss.xml',      icon: '🤖', category: 'AI/ML' },
+  { id: 'deepmind',    name: 'Google DeepMind',   feedUrl: 'https://deepmind.google/blog/rss.xml', icon: '🧠', category: 'AI/ML' },
+  { id: 'huggingface', name: 'Hugging Face Blog', feedUrl: 'https://huggingface.co/blog/feed.xml', icon: '🤗', category: 'AI/ML' },
+];
+
+function createOfficialAIFeedConfigs() {
+  return OFFICIAL_AI_FEEDS.map(config => ({ ...config }));
+}
+
 // ============================================
 // Big Tech Engineering Blogs (15 sources)
 // ============================================
@@ -53,28 +63,28 @@ export function communitySources() {
 
 export function aiMLBlogs() {
   return [
-    ...createRSSSources([
-      { id: 'openai',     name: 'OpenAI Blog',         feedUrl: 'https://openai.com/blog/rss.xml',          icon: '🤖', category: 'AI/ML' },
-      { id: 'deepmind',   name: 'Google DeepMind',      feedUrl: 'https://deepmind.google/blog/rss.xml',     icon: '🧠', category: 'AI/ML' },
-      { id: 'huggingface', name: 'Hugging Face Blog',   feedUrl: 'https://huggingface.co/blog/feed.xml',     icon: '🤗', category: 'AI/ML' },
-    ]),
+    ...createRSSSources(createOfficialAIFeedConfigs()),
     new RedditSource({ subreddit: 'MachineLearning', minUpvotes: 150 }),
     new HackerNewsSource({ query: 'AI LLM', minPoints: 80 }),
   ];
 }
 
 // ============================================
-// AI News Sources — daily driver (8 sources)
+// AI News Sources — daily driver (14 sources)
 // Drama, launches, industry news
 // ============================================
 
 export function aiNewsSources() {
   return [
     ...createRSSSources([
+      ...createOfficialAIFeedConfigs(),
       { id: 'techcrunch-ai',  name: 'TechCrunch AI',     feedUrl: 'https://techcrunch.com/category/artificial-intelligence/feed/', icon: '💚', category: 'AI News' },
       { id: 'verge-ai',       name: 'The Verge AI',      feedUrl: 'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml', icon: '🔮', category: 'AI News' },
       { id: 'ars-ai',         name: 'Ars Technica AI',   feedUrl: 'https://arstechnica.com/ai/feed/',           icon: '🔬', category: 'AI News' },
       { id: 'venturebeat-ai', name: 'VentureBeat AI',    feedUrl: 'https://venturebeat.com/category/ai/feed/',  icon: '📈', category: 'AI News' },
+      { id: 'wired-ai',       name: 'WIRED AI',          feedUrl: 'https://www.wired.com/feed/tag/ai/latest/rss', icon: '🧵', category: 'AI News' },
+      { id: 'mit-tech-review-ai', name: 'MIT Technology Review AI', feedUrl: 'https://www.technologyreview.com/topic/artificial-intelligence/feed/', icon: '🎓', category: 'AI News' },
+      { id: 'ieee-spectrum-ai', name: 'IEEE Spectrum AI', feedUrl: 'https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss', icon: '⚡', category: 'AI News' },
     ]),
     new RedditSource({ subreddit: 'LocalLLaMA', minUpvotes: 200 }),
     new RedditSource({ subreddit: 'singularity', minUpvotes: 300 }),
@@ -84,13 +94,12 @@ export function aiNewsSources() {
 }
 
 // ============================================
-// AI Deep-Dive Sources — weekly gems (6 sources)
+// AI Deep-Dive Sources — weekly gems (5 sources)
 // Technical analysis, research, strategy
 // ============================================
 
 export function aiDeepDiveSources() {
   return createRSSSources([
-    { id: 'simonwillison',  name: 'Simon Willison',     feedUrl: 'https://simonwillison.net/atom/everything/',          icon: '🧑‍💻', category: 'AI Deep-Dive' },
     { id: 'lilianweng',     name: 'Lilian Weng',        feedUrl: 'https://lilianweng.github.io/index.xml',              icon: '📝', category: 'AI Deep-Dive' },
     { id: 'latentspace',    name: 'Latent Space',       feedUrl: 'https://www.latent.space/feed',                       icon: '🎙️', category: 'AI Deep-Dive' },
     { id: 'ahead-of-ai',   name: 'Ahead of AI',        feedUrl: 'https://magazine.sebastianraschka.com/feed',           icon: '🔭', category: 'AI Deep-Dive' },

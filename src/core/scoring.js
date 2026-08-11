@@ -8,6 +8,7 @@ const DEFAULT_CREDIBILITY = {
   'Cloud': 25,
   'Developer Tools': 25,
   'AI/ML': 25,
+  'AI News': 25,
   'Fintech': 20,
   'E-commerce': 20,
   'Web Platform': 20,
