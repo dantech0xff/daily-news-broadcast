@@ -303,6 +303,12 @@ test('migrated legacy seen hash remains a direct dual-read dedup guard', async (
     importedAt: '2026-07-20T00:00:00.000Z',
   }, { expectedVersion: 0 }));
   const { instance, ai, outputs } = engine({ store });
+  instance.configure({
+    channelId: 'telegram-main',
+    timezone: 'UTC',
+    maxRetries: 0,
+    clock: () => new Date('2026-07-20T08:00:00.000Z'),
+  });
 
   const result = await instance.run({ requestId: 'normal-with-imported-seen' });
 
