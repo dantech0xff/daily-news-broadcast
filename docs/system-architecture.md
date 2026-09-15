@@ -120,7 +120,7 @@ Important details:
 - `CRON_SCHEDULE` and the per-channel cron overrides are exact five-field expressions
 - source fetches are batched, but channel execution is sequential
 - drip mode is a continuous radar: it carries unresolved work across days, and re-scans sources whenever the batch has open slots under the channel's daily limit (`DRIP_DAILY_LIMIT`, default 18) and its scan interval has elapsed (default 15 minutes, which only throttles back-to-back scans)
-- each scan runs under a renewable lease, so a claim lost mid-scan creates no deliveries; a scan counts as failed only when no source is healthy or it throws, and failures back off exponentially, capped at an hour, without blocking articles already queued
+- each scan runs under a renewable lease, so a claim lost mid-scan creates no deliveries; a scan counts as failed only when it throws, or when no source is healthy and it queued nothing; failures are logged, back off exponentially (capped at an hour), and never block articles already queued
 - `preview` never applies the daily limit or story-coverage exclusion; it stays read-only in every mode
 
 ## Security Model

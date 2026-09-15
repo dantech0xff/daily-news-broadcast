@@ -608,6 +608,31 @@ test('orphan adoption links scan deliveries but recovers only an expired claim',
   assert.equal(recovered.batch.activeRefillClaimToken, null);
 });
 
+test('a scan that enqueued articles counts as successful even without a healthy source', async () => {
+  const { machine, outputs } = await prepared();
+  const target = await radarBatch(machine);
+  const claim = await machine.claimBatchRefill(target);
+  const delivery = await machine.prepareDelivery({
+    requestId: 'unknown-source-item',
+    mode: 'drip',
+    publishingDay: '2026-07-20',
+    articles: [{ ...article, id: 'unknown-source', url: 'https://example.com/unknown-source' }],
+    outputs,
+  });
+
+  const recorded = await machine.recordBatchRefill({
+    ...target,
+    claimToken: claim.claimToken,
+    sourceHealth: { healthy: 0, unknown: 1 },
+    deliveries: [delivery],
+    scanIntervalMs: 900_000,
+  });
+
+  assert.equal(recorded.refillFailureCount, 0);
+  assert.equal(recorded.refillCount, 1);
+  assert.equal(recorded.nextRefillAt, '2026-07-20T00:15:00.000Z');
+});
+
 test('scan records require an interval and honor an explicit failure', async () => {
   const { machine } = await prepared();
   const target = await radarBatch(machine);

@@ -1404,7 +1404,14 @@ function projectRunResult(result) {
       degraded: result.sourceHealth.degraded,
     } : null,
     selection: projectSelectionStats(result?.stats?.selection),
+    scanError: projectScanError(result),
   };
+}
+
+/** Radar scan failures stay visible in request status even when queued items still delivered. */
+function projectScanError(result) {
+  const value = result?.scanError ?? (result?.reason === 'scan_failed' ? result?.error : null);
+  return value ? sanitizeError(value).slice(0, 200) : null;
 }
 
 function projectPreview(result) {

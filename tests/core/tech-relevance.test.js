@@ -36,6 +36,12 @@ const LABELED_ARTICLES = [
   },
   { keep: true, category: 'Big Tech', title: 'Our year in review' },
   { keep: true, category: 'AI Deep-Dive', title: 'Notes from a long weekend of reading' },
+  { keep: true, category: 'Community', title: 'Principles for Zig memory safety', content: '301 points, 77 comments' },
+  { keep: true, category: 'Community', title: 'Stripe outage postmortem' },
+  { keep: true, category: 'Community', title: 'HTTP/3 adoption keeps climbing' },
+  { keep: false, category: 'Community', title: 'Fans reacted to the season finale' },
+  { keep: false, category: 'Community', title: 'Rusted bridge closed after inspection' },
+  { keep: false, category: 'Community', title: 'Workers exploited by gig platforms' },
   {
     keep: false,
     category: 'AI News',
@@ -94,11 +100,17 @@ test('category labels are never scored as article text', () => {
   assert.equal(scored.relevant, false);
 });
 
-test('plural and inflected forms match without matching inside other words', () => {
+test('plural forms match, but verb forms and longer words do not', () => {
   assert.equal(scoreTechRelevance({ title: 'Cheaper GPUs arrive' }).techScore, 2);
-  assert.equal(scoreTechRelevance({ title: 'Vendor patched the exploited flaw' }).techScore, 2);
   assert.equal(scoreTechRelevance({ title: 'Senators meet', content: '' }).offTopicScore, 2);
+  assert.equal(scoreTechRelevance({ title: 'Fans reacted as storm clouded the parade' }).techScore, 0);
+  assert.equal(scoreTechRelevance({ title: 'Retailer hacked, card data stolen' }).techScore, 2);
   assert.equal(scoreTechRelevance({ title: 'Rustic said mail' }).techScore, 0);
+});
+
+test('only a bounded title prefix is scored', () => {
+  assert.equal(scoreTechRelevance({ title: `${'x '.repeat(300)}Kubernetes` }).techScore, 0);
+  assert.equal(scoreTechRelevance({ title: `Kubernetes ${'x '.repeat(300)}` }).techScore, 2);
 });
 
 test('trusted categories match exactly and bypass scoring', () => {

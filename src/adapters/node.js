@@ -14,6 +14,7 @@ import {
   buildOutputTopology,
   normalizeSendResult,
   opaqueId,
+  projectSelectionStats,
 } from '../core/index.js';
 import {
   buildEngine as defaultBuildEngine,
@@ -434,6 +435,8 @@ function projectRuntimeStats(stats) {
   }
   if (typeof stats.mode === 'string') projected.mode = boundedText(stats.mode, 20);
   if (typeof stats.ai === 'string') projected.ai = boundedText(stats.ai, 100);
+  const selection = projectSelectionStats(stats.selection);
+  if (selection) projected.selection = selection;
   return projected;
 }
 

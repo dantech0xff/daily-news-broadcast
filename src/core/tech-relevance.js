@@ -29,16 +29,18 @@ const TECH_TERMS = Object.freeze([
   'api', 'sdk', 'cli', 'compiler', 'runtime', 'kernel', 'linux', 'macos', 'ios', 'android', 'chrome',
   'firefox', 'browser', 'app', 'smartphone', 'iphone', 'programming', 'programmer', 'developer',
   'software engineer', 'source code', 'codebase', 'code review', 'pull request', 'git', 'javascript',
-  'typescript', 'python', 'rust', 'golang', 'java', 'kotlin', 'c++', 'webassembly', 'wasm', 'react',
-  'node.js', 'deno', 'database', 'postgres', 'postgresql', 'mysql', 'sqlite', 'redis', 'sql',
-  'distributed system', 'microservice', 'algorithm', 'encryption',
-  // Infrastructure and hardware
-  'cloud', 'kubernetes', 'docker', 'serverless', 'devops', 'data center', 'datacenter', 'gpu', 'cpu',
-  'npu', 'chip', 'chipmaker', 'semiconductor', 'processor', 'quantum computing', 'quantum computer',
-  'supercomputer',
+  'typescript', 'python', 'rust', 'golang', 'java', 'kotlin', 'c++', 'zig', 'webassembly', 'wasm',
+  'wasi', 'webgpu', 'webgl', 'react', 'node.js', 'deno', 'database', 'postgres', 'postgresql', 'mysql',
+  'sqlite', 'redis', 'sql', 'vim', 'neovim', 'emacs', 'distributed system', 'microservice', 'algorithm',
+  'encryption', 'jailbreak', 'open-sourced', 'saas',
+  // Infrastructure, networking, and hardware
+  'cloud', 'kubernetes', 'docker', 'serverless', 'devops', 'terraform', 'ansible', 'nginx', 'postmortem',
+  'post-mortem', 'data center', 'datacenter', 'tcp', 'udp', 'quic', 'http', 'https', 'dns', 'tls', 'ssh',
+  'gpu', 'cpu', 'npu', 'cuda', 'chip', 'chipmaker', 'semiconductor', 'processor', 'risc-v', 'arm64',
+  'x86', 'quantum computing', 'quantum computer', 'supercomputer',
   // Security
   'cybersecurity', 'vulnerability', 'vulnerabilities', 'cve', 'exploit', 'zero-day', 'malware',
-  'ransomware', 'phishing', 'data breach', 'hacker', 'security patch', 'patch release',
+  'ransomware', 'phishing', 'data breach', 'hacker', 'hacked', 'security patch', 'patch release',
   'patch tuesday', 'vpn', 'passkey',
 ]);
 
@@ -54,6 +56,7 @@ const OFF_TOPIC_TERMS = Object.freeze([
 const DEFAULT_MIN_TECH_SCORE = 2;
 const TITLE_WEIGHT = 2;
 const CONTENT_WEIGHT = 1;
+const TITLE_SCAN_LIMIT = 500;
 const CONTENT_SCAN_LIMIT = 2_000;
 
 const TECH_MATCHER = termMatcher(TECH_TERMS);
@@ -63,6 +66,7 @@ const OFF_TOPIC_MATCHER = termMatcher(OFF_TOPIC_TERMS);
  * Score one article for technology relevance.
  * Each distinct term counts once: TITLE_WEIGHT when it appears in the title, otherwise
  * CONTENT_WEIGHT when it appears in the first CONTENT_SCAN_LIMIT characters of content.
+ * Only the first TITLE_SCAN_LIMIT title characters are scanned (titles are untrusted input).
  * @param {import('./contracts.js').Article} article
  * @param {Object} [options]
  * @param {readonly string[]} [options.trustedCategories=TRUSTED_TECH_CATEGORIES]
@@ -72,7 +76,7 @@ const OFF_TOPIC_MATCHER = termMatcher(OFF_TOPIC_TERMS);
 export function scoreTechRelevance(article, options = {}) {
   const { trustedCategories, minTechScore } = normalizeOptions(options);
   const trusted = typeof article?.category === 'string' && trustedCategories.includes(article.category);
-  const title = String(article?.title ?? '');
+  const title = String(article?.title ?? '').slice(0, TITLE_SCAN_LIMIT);
   const content = String(article?.content ?? '').slice(0, CONTENT_SCAN_LIMIT);
   const tech = weightedTerms(TECH_MATCHER, title, content);
   const offTopic = weightedTerms(OFF_TOPIC_MATCHER, title, content);
@@ -138,14 +142,15 @@ function matchedTerms(matcher, text) {
 }
 
 /**
- * One case-insensitive alternation per lexicon. Terms may take a plural or inflected
- * suffix and may be followed by digits (for example "Qwen3.5" or "GPUs"), but never
- * match inside a longer word ("Rustic", "said").
+ * One case-insensitive alternation per lexicon. Terms may take a plural suffix and may be
+ * followed by digits (for example "GPUs" or "Qwen3.5"), but never match inside a longer
+ * word ("Rustic", "said") or as a verb form ("reacted", "clouded"); inflected forms that
+ * are real signals, such as "hacked", are listed explicitly.
  */
 function termMatcher(terms) {
   const alternation = [...terms]
     .sort((left, right) => right.length - left.length)
     .map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('|');
-  return new RegExp(`(?<![a-z0-9])(${alternation})(?:s|es|ed|ing)?(?![a-z])`, 'gi');
+  return new RegExp(`(?<![a-z0-9])(${alternation})(?:s|es)?(?![a-z])`, 'gi');
 }

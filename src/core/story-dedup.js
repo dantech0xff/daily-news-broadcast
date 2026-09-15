@@ -11,6 +11,8 @@
 const TRACKING_PARAMS = /^(utm_.+|ref|ref_src|fbclid|gclid|mc_cid|mc_eid)$/i;
 const MIN_SHARED_TOKENS = 3;
 const MIN_SHARED_RATIO = 0.6;
+// Titles are untrusted source data; tokenize a bounded prefix, matching the persisted title length.
+const TITLE_SCAN_LIMIT = 500;
 
 const STOPWORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'nor', 'of', 'in', 'on', 'at', 'to', 'for', 'from', 'by',
@@ -106,7 +108,7 @@ function canonicalUrl(value) {
 
 function headlineTokens(title) {
   const tokens = new Set();
-  const words = String(title ?? '').toLowerCase().replace(/[^a-z0-9.+\-'’]+/g, ' ').split(' ');
+  const words = String(title ?? '').slice(0, TITLE_SCAN_LIMIT).toLowerCase().replace(/[^a-z0-9.+\-'’]+/g, ' ').split(' ');
   for (const word of words) {
     const cleaned = word.replace(/['’]s$/, '').replace(/['’]/g, '').replace(/^[.-]+|[.-]+$/g, '');
     if (!cleaned) continue;

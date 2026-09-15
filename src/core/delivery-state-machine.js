@@ -1142,14 +1142,14 @@ export class DeliveryStateMachine {
   }
 
   /**
-   * Commit one radar scan. A scan fails when no source was healthy (or the caller reports
-   * a failure); failures back off exponentially up to an hour and never lock the day.
+   * Commit one radar scan. A scan fails when it enqueued nothing and no source was healthy
+   * (or the caller reports a failure); failures back off up to an hour and never lock the day.
    */
   async recordBatchRefill({ batchId, claimToken, sourceTopologyFingerprint, sourceHealth, deliveries, scanIntervalMs, failed }) {
     if (!Array.isArray(deliveries)) throw new Error('Refill deliveries must be an array');
     const intervalMs = positiveInteger(scanIntervalMs, 'scanIntervalMs');
     if (failed !== undefined && typeof failed !== 'boolean') throw new Error('Refill failure flag must be a boolean');
-    const scanFailed = failed ?? !(Number(sourceHealth?.healthy) > 0);
+    const scanFailed = failed ?? (!(Number(sourceHealth?.healthy) > 0) && deliveries.length === 0);
     const now = this._now();
     return this.store.transact(tx => {
       const batch = requireRecord(tx, 'day_batches', batchId);

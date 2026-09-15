@@ -75,6 +75,13 @@ test('signatures canonicalize links and ignore years, single digits, and filler 
   assert.equal(same({ title: '', url: null }, { title: '', url: null }), false);
 });
 
+test('headline tokens come from a bounded title prefix', () => {
+  const signature = storySignature({ title: `${'filler '.repeat(80)}Kubernetes`, url: null });
+
+  assert.equal(signature.tokens.has('kubernete'), false);
+  assert.ok(signature.tokens.has('filler'));
+});
+
 test('covered stories are excluded and each scan keeps one article per story', () => {
   const covered = [article('OpenAI launches GPT-5.5 with lower inference latency', 'https://openai.example/gpt-5-5')];
   const candidates = [

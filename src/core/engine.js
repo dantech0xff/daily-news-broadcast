@@ -332,13 +332,6 @@ export class ContentRadar {
     const force = runOptions.force === true;
     const batchSize = positiveInteger(runOptions.batchSize ?? 5, 'batchSize');
     const delayMs = nonNegativeInteger(runOptions.delayMs ?? 0, 'delayMs');
-    const dailyLimit = integerInRange(runOptions.dailyLimit ?? DEFAULT_DRIP_DAILY_LIMIT, 'dailyLimit', 1, 500);
-    const scanIntervalMs = integerInRange(
-      runOptions.scanIntervalMinutes ?? DEFAULT_SCAN_INTERVAL_MINUTES,
-      'scanIntervalMinutes',
-      1,
-      1_440,
-    ) * 60_000;
     this._validateBase();
     if (!dryRun) await this._validateMutation();
     runOptions = await normalizeMutationRunOptions(runOptions, {
@@ -404,6 +397,14 @@ export class ContentRadar {
         delayMs,
       });
     }
+    // Radar scan policy applies only to ordinary drip runs, never to preview, force, or carryover.
+    const dailyLimit = integerInRange(runOptions.dailyLimit ?? DEFAULT_DRIP_DAILY_LIMIT, 'dailyLimit', 1, 500);
+    const scanIntervalMs = integerInRange(
+      runOptions.scanIntervalMinutes ?? DEFAULT_SCAN_INTERVAL_MINUTES,
+      'scanIntervalMinutes',
+      1,
+      1_440,
+    ) * 60_000;
     const topologyFingerprint = await opaqueId(
       'source-topology',
       ...this.sources.map(source => source.sourceKey),
@@ -447,7 +448,6 @@ export class ContentRadar {
         machine,
         batchId,
         publishingDay,
-        startedAt,
         topologyFingerprint,
         limit: Math.min(batchSize - eligible.length, dailyLimit - items.length),
         scanIntervalMs,
@@ -511,7 +511,7 @@ export class ContentRadar {
    * Run one claimed radar scan of the day batch. It never throws: a failure is recorded
    * with backoff so items that are already queued still deliver in this run.
    */
-  async _scanDayBatch({ machine, batchId, publishingDay, startedAt, topologyFingerprint, limit, scanIntervalMs }) {
+  async _scanDayBatch({ machine, batchId, publishingDay, topologyFingerprint, limit, scanIntervalMs }) {
     const claim = await machine.claimBatchRefill({
       batchId,
       sourceTopologyFingerprint: topologyFingerprint,
@@ -521,21 +521,20 @@ export class ContentRadar {
       return { scanned: false, reason: claim.reason, sourceHealth: claim.batch?.sourceHealth ?? null };
     }
     let prepared = null;
+    const coverageDays = [publishingDay, previousPublishingDay(publishingDay)];
     try {
-      const previousDay = publishingDayFor(new Date(startedAt.getTime() - DAY_MS), this.options.timezone);
-      const covered = (await machine.listDeliveriesForPublishingDays([publishingDay, previousDay]))
-        .flatMap(delivery => (Array.isArray(delivery.articleSnapshot) ? delivery.articleSnapshot : []));
+      const covered = coveredArticles(await machine.listDeliveriesForPublishingDays(coverageDays));
+      // Excluding covered stories before middlewares keeps look-alikes out of the scoring cut.
       prepared = await this._prepareArticles({
         force: false,
         dryRun: false,
         exclude: articles => excludeCoveredStories(articles, covered),
       });
-      const selected = pickDistinctStories(prepared.articles, limit);
       // Renew before creating deliveries: a scan that lost its claim must leave nothing behind.
       const renewal = await machine.renewBatchRefillClaim({
         batchId,
         claimToken: claim.claimToken,
-        leaseMs: positiveInteger(this.options.attemptTimeoutMs, 'attemptTimeoutMs'),
+        leaseMs: this._scanLeaseMs(),
       });
       if (renewal.status !== 'renewed') {
         return {
@@ -545,6 +544,9 @@ export class ContentRadar {
           selection: prepared.selection,
         };
       }
+      // Forced drips do not take the scan claim, so re-read coverage after the fetch window.
+      const coveredNow = coveredArticles(await machine.listDeliveriesForPublishingDays(coverageDays));
+      const selected = pickDistinctStories(excludeCoveredStories(prepared.articles, coveredNow), limit);
       const deliveries = await this._prepareDripDeliveries(machine, selected, publishingDay);
       await machine.recordBatchRefill({
         batchId,
@@ -560,6 +562,12 @@ export class ContentRadar {
         selection: { ...prepared.selection, enqueued: deliveries.length },
       };
     } catch (error) {
+      const sanitizedError = sanitizeError(error);
+      console.error('[Radar] Scan failed', {
+        channelId: this.options.channelId,
+        publishingDay,
+        error: sanitizedError,
+      });
       try {
         await machine.recordBatchRefill({
           batchId,
@@ -576,7 +584,7 @@ export class ContentRadar {
       return {
         scanned: false,
         reason: 'scan_failed',
-        error: sanitizeError(error),
+        error: sanitizedError,
         sourceHealth: prepared?.sourceHealth ?? null,
         selection: prepared?.selection ?? null,
       };
@@ -1236,6 +1244,15 @@ function emptySourceResult({ publishingDay, sourceHealth, dryRun }) {
 function withSelection(result, selection) {
   if (!selection) return result;
   return { ...result, stats: { ...result.stats, selection } };
+}
+
+/** Calendar arithmetic on the publishing-day string stays correct across DST changes. */
+function previousPublishingDay(publishingDay) {
+  return new Date(Date.parse(`${publishingDay}T00:00:00.000Z`) - DAY_MS).toISOString().slice(0, 10);
+}
+
+function coveredArticles(deliveries) {
+  return deliveries.flatMap(delivery => (Array.isArray(delivery.articleSnapshot) ? delivery.articleSnapshot : []));
 }
 
 function identityCollisionDiagnostic(diagnostic) {

@@ -522,7 +522,8 @@ test('an automatically retrying item that fills the batch skips scanning', async
   assert.equal(output.calls.length, 2);
 });
 
-test('a scan error after claiming still delivers queued items and backs off', async () => {
+test('a scan error after claiming still delivers queued items and backs off', async (t) => {
+  const logged = t.mock.method(console, 'error', () => {});
   const store = new MemoryDeliveryStore({ durable: true });
   const time = mutableClock();
   const source = new RecordingSource([article]);
@@ -543,6 +544,10 @@ test('a scan error after claiming still delivers queued items and backs off', as
   assert.equal(delivered.status, 'success');
   assert.equal(delivered.articles[0].article, 'Drip survives failure');
   assert.match(delivered.scanError, /selection exploded/);
+  const scanLog = logged.mock.calls.find(call => call.arguments[0] === '[Radar] Scan failed');
+  assert.ok(scanLog, 'scan failures are logged');
+  assert.equal(scanLog.arguments[1].channelId, 'telegram-main');
+  assert.match(scanLog.arguments[1].error, /selection exploded/);
   assert.equal(batch.refillFailureCount, 1);
   assert.equal(batch.activeRefillClaimToken, null);
   assert.equal(batch.nextRefillAt, '2026-07-20T08:16:00.000Z');
@@ -552,6 +557,89 @@ test('a scan error after claiming still delivers queued items and backs off', as
   assert.equal(failed.status, 'failed');
   assert.equal(failed.reason, 'scan_failed');
   assert.equal(output.calls.length, 2);
+});
+
+test('a story forced out while a scan is fetching is not posted again by that scan', async () => {
+  class GatedSource extends RecordingSource {
+    get sourceKey() { return 'gated-source:feed-a'; }
+    async fetch() {
+      this.calls += 1;
+      if (this.blocked) {
+        this.onFetch?.();
+        await this.blocked;
+      }
+      return structuredClone(this.articles);
+    }
+  }
+
+  const store = new MemoryDeliveryStore({ durable: true });
+  const time = mutableClock();
+  const gated = new GatedSource([story('nvidia-b', 'At GTC, Nvidia shows off Rubin architecture')]);
+  const scanOutput = new RecordingOutput({ key: 'telegram:shared-radar' });
+  const forcedOutput = new RecordingOutput({ key: 'telegram:shared-radar' });
+  const scanEngine = radar({ store, source: gated, output: scanOutput, options: { clock: time.clock } });
+  const forcedEngine = radar({
+    store,
+    source: new RecordingSource([story('nvidia-a', 'Nvidia unveils Rubin GPUs at GTC')]),
+    output: forcedOutput,
+    options: { clock: time.clock },
+  });
+  let release;
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  gated.blocked = new Promise(resolve => { release = resolve; });
+  gated.onFetch = markStarted;
+
+  const scan = scanEngine.runDrip({ batchSize: 1 });
+  await started;
+  const forced = await forcedEngine.runDrip({
+    force: true,
+    requestId: 'forced-during-scan',
+    idempotencyKey: 'forced-during-scan-key',
+  });
+  assert.equal(forced.status, 'success');
+  release();
+  const result = await scan;
+
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.reason, 'no_articles');
+  assert.equal(scanOutput.calls.length, 0);
+  assert.equal((await store.list('deliveries')).length, 1);
+});
+
+test('story coverage looks back one calendar publishing day across DST changes', async () => {
+  const store = new MemoryDeliveryStore({ durable: true });
+  // 2026-11-01 is the 25-hour fall-back day in America/New_York.
+  const time = mutableClock('2026-10-31T16:00:00.000Z');
+  const source = new RecordingSource([story('nvidia-a', 'Nvidia unveils Rubin GPUs at GTC')]);
+  const output = new RecordingOutput();
+  const engine = radar({ store, source, output, options: { clock: time.clock, timezone: 'America/New_York' } });
+  assert.equal((await engine.runDrip({ batchSize: 1 })).publishingDay, '2026-10-31');
+
+  time.set('2026-11-02T04:30:00.000Z');
+  source.articles = [story('nvidia-b', 'At GTC, Nvidia shows off Rubin architecture')];
+  const late = await engine.runDrip({ batchSize: 1 });
+
+  assert.equal(late.publishingDay, '2026-11-01');
+  assert.equal(late.status, 'skipped');
+  assert.equal(late.reason, 'no_articles');
+  assert.equal(output.calls.length, 1);
+});
+
+test('preview and forced drips ignore radar-only scan settings', async () => {
+  const store = new MemoryDeliveryStore({ durable: true });
+  const engine = radar({ store, source: new RecordingSource([article]) });
+
+  const preview = await engine.runDrip({ dryRun: true, batchSize: 1, dailyLimit: 0, scanIntervalMinutes: 0 });
+  assert.equal(preview.status, 'dry_run');
+  const forced = await engine.runDrip({
+    force: true,
+    requestId: 'forced-ignores-scan-policy',
+    idempotencyKey: 'forced-ignores-scan-policy-key',
+    dailyLimit: 0,
+  });
+  assert.equal(forced.status, 'success');
+  await assert.rejects(engine.runDrip({ batchSize: 1, dailyLimit: 0 }), /dailyLimit must be an integer in range 1-500/);
 });
 
 test('a source identity collision fails only that source', async () => {
