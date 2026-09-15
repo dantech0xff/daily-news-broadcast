@@ -598,9 +598,9 @@ export async function executeRecoveryControl(channel, action, {
           singleMutation: targetDelivery.singleMutation === true,
           signal,
         },
-      ), timeoutMs, 'Output retry'));
+      ), timeoutMs, 'Output retry'), { now: new Date(clock()).getTime() });
     } catch (error) {
-      normalized = normalizeSendResult(null, { error });
+      normalized = normalizeSendResult(null, { error, now: new Date(clock()).getTime() });
     }
     const committed = await machine.commitOutput(result.attempt.attemptId, normalized);
     return projectRecoveryResult({ status: committed.delivery.state, delivery: committed.delivery });

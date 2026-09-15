@@ -783,9 +783,9 @@ export class NewsEngine {
             signal,
           },
         ), outputTimeoutMs, `Output ${output.id}`);
-        normalized = normalizeSendResult(sent);
+        normalized = normalizeSendResult(sent, { now: this._captureInstant().getTime() });
       } catch (error) {
-        normalized = normalizeSendResult(null, { error });
+        normalized = normalizeSendResult(null, { error, now: this._captureInstant().getTime() });
       }
       try {
         const committed = await machine.commitOutput(claim.attempt.attemptId, normalized);

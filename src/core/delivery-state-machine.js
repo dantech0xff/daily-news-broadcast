@@ -385,8 +385,8 @@ export class DeliveryStateMachine {
   }
 
   async commitOutput(attemptId, rawResult) {
-    const result = normalizeSendResult(rawResult);
     const now = this._now();
+    const result = normalizeSendResult(rawResult, { now: now.getTime() });
     return this.store.transact(tx => {
       const attempt = requireRecord(tx, 'attempts', attemptId);
       if (attempt.kind !== 'output' || attempt.state !== 'attempting') throw new Error('Output attempt is not active');
