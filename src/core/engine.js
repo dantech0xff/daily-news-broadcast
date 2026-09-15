@@ -221,6 +221,7 @@ export class ContentRadar {
 
     let articles = delivery?.articleSnapshot ?? reservationClaim?.reservation?.articleSnapshot ?? null;
     sourceHealth = reservationClaim?.reservation?.sourceHealth ?? sourceHealth;
+    let selection = null;
     if (!articles) {
       const prepared = await this._prepareArticles({
         force,
@@ -229,6 +230,7 @@ export class ContentRadar {
       });
       articles = prepared.articles;
       sourceHealth = prepared.sourceHealth;
+      selection = prepared.selection;
       if (articles.length === 0) {
         if (!dryRun && reservationId && reservationClaim?.claimToken) {
           await machine.completeDeliveryReservation(reservationId, reservationClaim.claimToken, {
@@ -237,7 +239,7 @@ export class ContentRadar {
             sourceHealth,
           });
         }
-        return emptySourceResult({ publishingDay, sourceHealth, dryRun });
+        return withSelection(emptySourceResult({ publishingDay, sourceHealth, dryRun }), selection);
       }
       if (dryRun) {
         const generated = await this._summarize(articles, 'digest');
@@ -247,7 +249,7 @@ export class ContentRadar {
           content: generated.text,
           sourceHealth,
           aiUsage: generated.usage ?? null,
-          stats: this._stats(articles.length, Date.now() - startedAt.getTime()),
+          stats: { ...this._stats(articles.length, Date.now() - startedAt.getTime()), selection },
           outputs: [],
         };
       }
@@ -315,7 +317,7 @@ export class ContentRadar {
     });
     if (result.status === 'success') result.maintenance = await this._drainMaintenance(machine);
     result.publishingDay = publishingDay;
-    return result;
+    return withSelection(result, selection);
   }
 
   async runDrip(runOptions = {}) {
@@ -336,7 +338,10 @@ export class ContentRadar {
     if (dryRun) {
       const prepared = await this._prepareArticles({ force, dryRun: true });
       if (prepared.articles.length === 0) {
-        return emptySourceResult({ publishingDay, sourceHealth: prepared.sourceHealth, dryRun: true });
+        return withSelection(
+          emptySourceResult({ publishingDay, sourceHealth: prepared.sourceHealth, dryRun: true }),
+          prepared.selection,
+        );
       }
       const selected = prepared.articles.slice(0, batchSize);
       const items = [];
@@ -350,7 +355,11 @@ export class ContentRadar {
         publishingDay,
         articles: items,
         sourceHealth: prepared.sourceHealth,
-        stats: { ...this._stats(selected.length, Date.now() - startedAt.getTime()), mode: 'drip' },
+        stats: {
+          ...this._stats(selected.length, Date.now() - startedAt.getTime()),
+          mode: 'drip',
+          selection: prepared.selection,
+        },
       };
     }
 
@@ -406,11 +415,13 @@ export class ContentRadar {
       sourceHealth = batch.sourceHealth ?? sourceHealth;
     }
 
+    let selection = null;
     if (!batch) {
       const prepared = await this._prepareArticles({ force: false, dryRun: false });
       sourceHealth = prepared.sourceHealth;
+      selection = prepared.selection;
       if (prepared.articles.length === 0 && !sourceHealth.exhaustionEligible) {
-        return emptySourceResult({ publishingDay, sourceHealth, dryRun: false });
+        return withSelection(emptySourceResult({ publishingDay, sourceHealth, dryRun: false }), selection);
       }
       const deliveries = await this._prepareDripDeliveries(machine, prepared.articles, publishingDay);
       batch = await machine.ensureDayBatch({
@@ -448,6 +459,7 @@ export class ContentRadar {
       if (refillClaim.status === 'claimed') {
         const refill = await this._prepareArticles({ force: false, dryRun: false });
         sourceHealth = refill.sourceHealth;
+        selection = refill.selection;
         const deliveries = await this._prepareDripDeliveries(machine, refill.articles, publishingDay);
         batch = await machine.recordBatchRefill({
           batchId,
@@ -478,14 +490,14 @@ export class ContentRadar {
           : batch.refillCount >= 1
             ? 'refill_limit_reached'
             : null);
-      return {
+      return withSelection({
         status: 'skipped',
         reason: batch.exhausted ? 'batch_exhausted' : refillBlocked ?? 'queue_empty',
         mode: 'drip',
         publishingDay,
         sourceHealth,
         stats: { ...this._stats(0, Date.now() - startedAt.getTime()), mode: 'drip', remaining: 0 },
-      };
+      }, selection);
     }
 
     const itemResults = [];
@@ -506,7 +518,7 @@ export class ContentRadar {
     const status = aggregateItemStatuses(itemResults);
     if (status === 'success' || status === 'partial') await this._drainMaintenance(machine);
     const queue = await this.getQueue({ publishingDay });
-    return {
+    return withSelection({
       status,
       mode: 'drip',
       publishingDay,
@@ -518,7 +530,7 @@ export class ContentRadar {
         remaining: queue.remaining,
         blocked: queue.blocked,
       },
-    };
+    }, selection);
   }
 
   async _runForcedDrip({ machine, runOptions, publishingDay, startedAt }) {
@@ -544,6 +556,7 @@ export class ContentRadar {
       };
     }
     let sourceHealth = null;
+    let selection = null;
     let delivery = existing;
     let article = existing?.articleSnapshot?.[0] ?? (existing ? { title: null } : null);
     if (!delivery) {
@@ -553,11 +566,12 @@ export class ContentRadar {
         limit: runOptions.articleLimit,
       });
       sourceHealth = prepared.sourceHealth;
+      selection = prepared.selection;
       if (prepared.articles.length === 0) {
-        return {
+        return withSelection({
           ...emptySourceResult({ publishingDay, sourceHealth, dryRun: false }),
           mode: 'drip',
-        };
+        }, selection);
       }
       article = prepared.articles[0];
       delivery = await machine.prepareDelivery({
@@ -593,7 +607,7 @@ export class ContentRadar {
     });
     if (result.status === 'success') result.maintenance = await this._drainMaintenance(machine);
     const queue = await this.getQueue({ publishingDay });
-    return {
+    return withSelection({
       status: result.status,
       reason: result.reason,
       deliveryId: result.deliveryId,
@@ -608,7 +622,7 @@ export class ContentRadar {
         remaining: queue.remaining,
         blocked: queue.blocked,
       },
-    };
+    }, selection);
   }
 
   async _runDripCarryover({ machine, deliveries, publishingDay, startedAt, delayMs }) {
@@ -821,10 +835,18 @@ export class ContentRadar {
   async _prepareArticles({ force, dryRun, limit }) {
     const fetched = await this._fetchAllDetailed();
     let articles = fetched.articles;
+    // Per-run counts make over-filtering visible without exposing article content.
+    const selection = { fetched: articles.length };
     if (!force) articles = await this._dedup(articles, { dryRun });
-    for (const middleware of this.middlewares) articles = await middleware(articles);
+    selection.fresh = articles.length;
+    selection.relevant = articles.length;
+    for (const middleware of this.middlewares) {
+      articles = await middleware(articles);
+      if (middleware.label === 'tech-relevance') selection.relevant = articles.length;
+    }
+    selection.ranked = articles.length;
     if (limit !== undefined) articles = articles.slice(0, positiveInteger(limit, 'articleLimit'));
-    return { articles, sourceHealth: fetched.sourceHealth };
+    return { articles, sourceHealth: fetched.sourceHealth, selection };
   }
 
   async _prepareDripDeliveries(machine, articles, publishingDay) {
@@ -1116,6 +1138,12 @@ function emptySourceResult({ publishingDay, sourceHealth, dryRun }) {
     sourceHealth,
     stats: { articles: 0 },
   };
+}
+
+/** Attach the run's article selection counts to its stats when this run prepared articles. */
+function withSelection(result, selection) {
+  if (!selection) return result;
+  return { ...result, stats: { ...result.stats, selection } };
 }
 
 function pausedRunResult({ publishingDay, mode }) {

@@ -10,9 +10,11 @@ import {
   channelArticleHash,
   createScoringMiddleware,
   createSemanticDedupMiddleware,
+  createTechRelevanceMiddleware,
   normalizeSendResult,
   opaqueId,
   projectArticle,
+  projectSelectionStats,
   sanitizeError,
 } from '../core/index.js';
 import { defineChannels } from '../channels/definitions.js';
@@ -652,6 +654,7 @@ export class ChannelDeliveryCoordinator extends DurableObject {
     for (const output of channel.outputs ?? [channel.output]) engine.addOutput(output);
     engine.useCache(cache);
     engine.useDeliveryStore(this.store);
+    engine.use(createTechRelevanceMiddleware());
     engine.use(createScoringMiddleware({ maxArticles: channel.maxArticles || 12 }));
     engine.use(createSemanticDedupMiddleware());
     engine.configure({
@@ -1395,6 +1398,7 @@ function projectRunResult(result) {
       unknown: result.sourceHealth.unknown,
       degraded: result.sourceHealth.degraded,
     } : null,
+    selection: projectSelectionStats(result?.stats?.selection),
   };
 }
 

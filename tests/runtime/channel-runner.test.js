@@ -1,11 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isHalfHourlyScheduleReachable, runChannels, shouldRun } from '../../src/channels/runner.js';
+import { MemoryCache } from '../../src/core/caches.js';
+import { buildEngine, isHalfHourlyScheduleReachable, runChannels, shouldRun } from '../../src/channels/runner.js';
+import { RecordingOutput } from '../helpers/fakes.js';
 
 function channel(id, mode = 'digest', schedule = '15 9 * * *') {
   return { id, mode, schedule, timezone: 'Asia/Singapore', batchSize: 3, delayMs: 0 };
 }
+
+test('channel engines gate tech relevance before scoring and semantic dedup', () => {
+  const engine = buildEngine({
+    id: 'telegram-main',
+    sources: [],
+    output: new RecordingOutput(),
+    prompt: {},
+    maxArticles: 12,
+  }, { cache: new MemoryCache() });
+
+  assert.deepEqual(
+    engine.middlewares.map(middleware => JSON.parse(middleware.selectionKey)[0]),
+    ['tech-relevance', 'scoring', 'semantic-dedup'],
+  );
+});
 
 function recordingEngine() {
   const calls = [];

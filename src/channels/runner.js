@@ -8,6 +8,7 @@ import {
   PrefixedCache,
   createScoringMiddleware,
   createSemanticDedupMiddleware,
+  createTechRelevanceMiddleware,
   opaqueId,
   sanitizeError,
 } from '../core/index.js';
@@ -232,6 +233,7 @@ export function buildEngine(ch, cacheOrDependencies, additionalDependencies = {}
   engine.addOutput(ch.output);
   engine.useCache(prefixed);
   if (deliveryStore) engine.useDeliveryStore(deliveryStore);
+  engine.use(createTechRelevanceMiddleware());
   engine.use(createScoringMiddleware({ maxArticles: ch.maxArticles || 12 }));
   engine.use(createSemanticDedupMiddleware());
   engine.configure({

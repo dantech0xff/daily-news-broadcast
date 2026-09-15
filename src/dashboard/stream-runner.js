@@ -8,6 +8,7 @@ import {
   DeliveryStateMachine,
   PrefixedCache,
   buildOutputTopology,
+  createTechRelevanceMiddleware,
   normalizeSendResult,
   opaqueId,
 } from '../core/index.js';
@@ -191,6 +192,7 @@ export function buildEngine(streamConfig, dependencies = {}) {
 
   engine.useCache(new PrefixedCache(cache, `news:${resolvedStream.id}`));
   engine.useDeliveryStore(deliveryStore);
+  engine.use(createTechRelevanceMiddleware());
 
   const opts = resolvedStream.options || {};
   engine.configure({

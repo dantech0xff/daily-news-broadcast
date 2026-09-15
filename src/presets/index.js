@@ -70,8 +70,8 @@ export function aiMLBlogs() {
 }
 
 // ============================================
-// AI News Sources — daily driver (14 sources)
-// Drama, launches, industry news
+// AI News Sources — daily driver (13 sources)
+// Launches, research, and industry news
 // ============================================
 
 export function aiNewsSources() {
@@ -87,7 +87,6 @@ export function aiNewsSources() {
       { id: 'ieee-spectrum-ai', name: 'IEEE Spectrum AI', feedUrl: 'https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss', icon: '⚡', category: 'AI News' },
     ]),
     new RedditSource({ subreddit: 'LocalLLaMA', minUpvotes: 200 }),
-    new RedditSource({ subreddit: 'singularity', minUpvotes: 300 }),
     new RedditSource({ subreddit: 'artificial', minUpvotes: 200 }),
     new HackerNewsSource({ query: 'AI LLM GPT OpenAI Anthropic', minPoints: 80 }),
   ];

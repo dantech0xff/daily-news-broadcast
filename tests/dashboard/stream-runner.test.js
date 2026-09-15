@@ -13,6 +13,15 @@ const stream = {
 
 const SHORT_ATTEMPT_TIMEOUT_MS = 40;
 
+test('dashboard stream engines apply the tech relevance gate', () => {
+  const engine = buildEngine(stream, {
+    cache: new MemoryCache(),
+    deliveryStore: new MemoryDeliveryStore({ durable: true }),
+  });
+
+  assert.deepEqual(engine.middlewares.map(middleware => middleware.label), ['tech-relevance']);
+});
+
 function shortLeaseMachine(options) {
   return new DeliveryStateMachine({ ...options, attemptTimeoutMs: SHORT_ATTEMPT_TIMEOUT_MS });
 }

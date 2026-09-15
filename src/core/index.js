@@ -3,6 +3,7 @@ export { SourcePlugin, AIPlugin, OutputPlugin, CachePlugin } from './contracts.j
 export { MemoryCache, FileCache, CloudflareKVCache, RedisCache } from './caches.js';
 export { createScoringMiddleware } from './scoring.js';
 export { createSemanticDedupMiddleware } from './semantic-dedup.js';
+export { TRUSTED_TECH_CATEGORIES, createTechRelevanceMiddleware, scoreTechRelevance } from './tech-relevance.js';
 export { groupByCategory } from './grouping.js';
 export { PrefixedCache } from './prefixed-cache.js';
 export {
@@ -14,6 +15,7 @@ export {
   normalizeSendResult,
   opaqueId,
   projectArticle,
+  projectSelectionStats,
   publishingDayFor,
   sanitizeError,
 } from './delivery.js';
