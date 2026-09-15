@@ -300,7 +300,12 @@ export async function runChannels(channels, options = {}) {
         requestedAt: now,
       };
       const result = ch.mode === 'drip'
-        ? await engine.runDrip({ batchSize: ch.batchSize || 5, delayMs: ch.delayMs ?? 0, ...runOptions })
+        ? await engine.runDrip({
+          batchSize: ch.batchSize || 5,
+          delayMs: ch.delayMs ?? 0,
+          ...(ch.dailyLimit !== undefined && { dailyLimit: ch.dailyLimit }),
+          ...runOptions,
+        })
         : await engine.run(runOptions);
 
       const ms = Date.now() - start;

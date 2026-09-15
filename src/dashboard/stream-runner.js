@@ -56,6 +56,7 @@ const STREAM_INTEGER_OPTIONS = Object.freeze({
   concurrency: [1, 50],
   batchSize: [1, 100],
   delayMs: [0, 3_600_000],
+  dailyLimit: [1, 500],
   maxArticles: [1, 500],
   maxArticlesPerSource: [1, 100],
 });
@@ -244,6 +245,7 @@ export async function executeStream(streamConfig, options = {}, dependencies = {
         ...runOptions,
         ...(resolvedStream.options.batchSize !== undefined && { batchSize: resolvedStream.options.batchSize }),
         ...(resolvedStream.options.delayMs !== undefined && { delayMs: resolvedStream.options.delayMs }),
+        ...(resolvedStream.options.dailyLimit !== undefined && { dailyLimit: resolvedStream.options.dailyLimit }),
       })
       : await engine.run(runOptions);
     return { ...result, logs };

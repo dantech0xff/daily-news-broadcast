@@ -114,6 +114,7 @@ export function defineChannels(env) {
       timezone: e(env, 'CRON_TIMEZONE', 'UTC'),
       batchSize: eInt(env, 'DRIP_BATCH_SIZE', 5),
       delayMs: eInt(env, 'DRIP_DELAY_MS', 0),
+      dailyLimit: eInt(env, 'DRIP_DAILY_LIMIT', 18),
       maxArticles: eInt(env, 'MAX_ARTICLES', 12),
       maxArticlesPerSource: eInt(env, 'MAX_ARTICLES_PER_SOURCE', 3),
       concurrency: eInt(env, 'CONCURRENCY_LIMIT', 5),
@@ -142,6 +143,7 @@ export function defineChannels(env) {
       timezone: e(env, 'X_CRON_TIMEZONE', e(env, 'CRON_TIMEZONE', 'UTC')),
       batchSize: eInt(env, 'X_BATCH_SIZE', 3),
       delayMs: 0,
+      dailyLimit: 10,
       maxArticles: 10,
       maxArticlesPerSource: 3,
       concurrency: 5,
@@ -162,6 +164,7 @@ export function defineChannels(env) {
       timezone: e(env, 'FB_CRON_TIMEZONE', e(env, 'CRON_TIMEZONE', 'UTC')),
       batchSize: eInt(env, 'FB_BATCH_SIZE', 1),
       delayMs: 0,
+      dailyLimit: 10,
       maxArticles: 10,
       maxArticlesPerSource: 3,
       concurrency: 5,
@@ -183,6 +186,7 @@ export function defineChannels(env) {
       timezone: e(env, 'THREADS_CRON_TIMEZONE', e(env, 'CRON_TIMEZONE', 'UTC')),
       batchSize: 2,
       delayMs: 0,
+      dailyLimit: 8,
       maxArticles: 8,
       maxArticlesPerSource: 3,
       concurrency: 5,
@@ -212,6 +216,7 @@ export function validateChannels(channels) {
     validateInteger(channel.concurrency, `Channel ${channel.id} concurrency`, 1, 50);
     validateInteger(channel.batchSize, `Channel ${channel.id} batchSize`, 1, 100);
     validateInteger(channel.delayMs, `Channel ${channel.id} delayMs`, 0, 3_600_000);
+    validateInteger(channel.dailyLimit, `Channel ${channel.id} dailyLimit`, 1, 500);
     validateInteger(channel.maxArticles, `Channel ${channel.id} maxArticles`, 1, 500);
     validateInteger(channel.maxArticlesPerSource, `Channel ${channel.id} maxArticlesPerSource`, 1, 100);
   }

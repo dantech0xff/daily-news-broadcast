@@ -57,6 +57,17 @@ test('manual trigger bypasses schedule without forcing delivery selection', asyn
   assert.equal(engine.calls[0].options.force, false);
 });
 
+test('drip channels forward their daily post limit to the engine', async () => {
+  const engine = recordingEngine();
+  await runChannels([{ ...channel('drip', 'drip'), dailyLimit: 7 }], {
+    cache: {}, deliveryStore: {}, triggerType: 'manual',
+    engineFactory: () => engine, logger: { log() {}, warn() {} },
+  });
+
+  assert.equal(engine.calls[0].method, 'runDrip');
+  assert.equal(engine.calls[0].options.dailyLimit, 7);
+});
+
 test('force trigger reaches both digest and drip engines', async () => {
   const digest = recordingEngine();
   const drip = recordingEngine();

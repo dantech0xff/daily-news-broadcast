@@ -962,7 +962,7 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
     });
   });
 
-  it('keeps only bounded selection counts in completed request results', async () => {
+  it('forwards the channel daily limit and keeps bounded selection counts in request results', async () => {
     const channelId = 'selection-counts-channel';
     const requestId = 'selection-counts-request';
     const stub = coordinator(channelId);
@@ -989,9 +989,11 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
         force: false,
         requestedAt: '2026-07-20T00:00:00.000Z',
       });
-      instance._findChannel = () => ({ id: channelId, output: OUTPUT, mode: 'drip' });
+      let receivedOptions;
+      instance._findChannel = () => ({ id: channelId, output: OUTPUT, mode: 'drip', dailyLimit: 7 });
       instance._buildEngine = () => ({
-        async runDrip() {
+        async runDrip(options) {
+          receivedOptions = options;
           return {
             status: 'skipped',
             reason: 'no_articles',
@@ -1008,6 +1010,7 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
       await instance.runRequest(requestId);
 
       const request = await instance.getRequest({ channelId, requestId });
+      expect(receivedOptions.dailyLimit).toBe(7);
       expect(request.result.selection).toEqual({ fetched: 5, fresh: 4, relevant: 2, ranked: 2 });
     });
   });

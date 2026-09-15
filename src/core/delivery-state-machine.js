@@ -48,6 +48,9 @@ const TRANSITIONS = Object.freeze({
 const TERMINAL_DELIVERY_STATES = new Set(['succeeded', 'abandoned']);
 const TERMINAL_OUTPUT_STATES = new Set(['succeeded', 'abandoned']);
 const DAY_MS = 24 * 60 * 60 * 1_000;
+const MAX_SCAN_FAILURE_STREAK = 10;
+const MAX_SCAN_BACKOFF_MS = 60 * 60 * 1_000;
+const RECENT_DELIVERY_LOOKUP_LIMIT = 500;
 
 export class DeliveryStateMachine {
   constructor({
@@ -1029,7 +1032,10 @@ export class DeliveryStateMachine {
         }, { expectedVersion: 0 });
       }
       const claimStartedAt = Date.parse(batch.updatedAt ?? '');
+      // A live scan claim still owns its in-flight deliveries: link them, but never steal the claim.
+      const claimExpired = !batch.refillDeadlineAt || Date.parse(batch.refillDeadlineAt) <= Date.parse(now);
       const recoversClaimedRefill = Boolean(batch.activeRefillClaimToken)
+        && claimExpired
         && Number.isFinite(claimStartedAt)
         && orphans.some(delivery => Date.parse(delivery.createdAt ?? '') >= claimStartedAt);
       if (recoversClaimedRefill) {
@@ -1087,7 +1093,12 @@ export class DeliveryStateMachine {
     });
   }
 
-  async claimBatchRefill({ batchId, sourceTopologyFingerprint, maxFailedRefills = 3 }) {
+  /**
+   * Claim one radar scan of the day batch. The persisted `refill*` field names predate
+   * continuous scanning; each "refill" is now one interval-gated scan of the sources.
+   */
+  async claimBatchRefill({ batchId, sourceTopologyFingerprint, leaseMs = this.attemptTimeoutMs }) {
+    const lease = positiveInteger(leaseMs, 'leaseMs');
     const claimToken = crypto.randomUUID();
     const now = this._now();
     return this.store.transact(tx => {
@@ -1096,13 +1107,9 @@ export class DeliveryStateMachine {
       if (batch.sourceTopologyFingerprint !== sourceTopologyFingerprint) {
         throw new Error('Source topology changed before refill claim');
       }
-      if (batch.exhausted) return { status: 'blocked', reason: 'batch_exhausted', batch };
-      if (batch.refillCount >= 1) return { status: 'blocked', reason: 'refill_limit_reached', batch };
-      if (batch.refillFailureCount >= maxFailedRefills) {
-        return { status: 'blocked', reason: 'refill_failure_limit_reached', batch };
-      }
       if (batch.nextRefillAt && new Date(batch.nextRefillAt) > now) {
-        return { status: 'blocked', reason: 'refill_backoff', batch };
+        const reason = Number(batch.refillFailureCount ?? 0) > 0 ? 'refill_backoff' : 'refill_not_due';
+        return { status: 'blocked', reason, batch };
       }
       if (batch.activeRefillClaimToken && batch.refillDeadlineAt && new Date(batch.refillDeadlineAt) > now) {
         return { status: 'in_flight', reason: 'refill_in_flight', batch };
@@ -1110,15 +1117,39 @@ export class DeliveryStateMachine {
       const claimed = tx.put('day_batches', batchId, {
         ...batch,
         activeRefillClaimToken: claimToken,
-        refillDeadlineAt: new Date(now.getTime() + this.attemptTimeoutMs).toISOString(),
+        refillDeadlineAt: new Date(now.getTime() + lease).toISOString(),
         updatedAt: now.toISOString(),
       }, { expectedVersion: batch.version });
       return { status: 'claimed', claimToken, batch: claimed };
     });
   }
 
-  async recordBatchRefill({ batchId, claimToken, sourceTopologyFingerprint, sourceHealth, deliveries, maxFailedRefills = 3 }) {
+  /** Extend a scan claim right before creating deliveries; a lost claim must create none. */
+  async renewBatchRefillClaim({ batchId, claimToken, leaseMs = this.attemptTimeoutMs }) {
+    const lease = positiveInteger(leaseMs, 'leaseMs');
+    const now = this._now();
+    return this.store.transact(tx => {
+      const batch = requireRecord(tx, 'day_batches', batchId);
+      if (batch.channelId !== this.channelId) throw new Error('Day batch belongs to another channel');
+      if (!claimToken || batch.activeRefillClaimToken !== claimToken) return { status: 'lost', batch };
+      const renewed = tx.put('day_batches', batchId, {
+        ...batch,
+        refillDeadlineAt: new Date(now.getTime() + lease).toISOString(),
+        updatedAt: now.toISOString(),
+      }, { expectedVersion: batch.version });
+      return { status: 'renewed', batch: renewed };
+    });
+  }
+
+  /**
+   * Commit one radar scan. A scan fails when no source was healthy (or the caller reports
+   * a failure); failures back off exponentially up to an hour and never lock the day.
+   */
+  async recordBatchRefill({ batchId, claimToken, sourceTopologyFingerprint, sourceHealth, deliveries, scanIntervalMs, failed }) {
     if (!Array.isArray(deliveries)) throw new Error('Refill deliveries must be an array');
+    const intervalMs = positiveInteger(scanIntervalMs, 'scanIntervalMs');
+    if (failed !== undefined && typeof failed !== 'boolean') throw new Error('Refill failure flag must be a boolean');
+    const scanFailed = failed ?? !(Number(sourceHealth?.healthy) > 0);
     const now = this._now();
     return this.store.transact(tx => {
       const batch = requireRecord(tx, 'day_batches', batchId);
@@ -1129,7 +1160,6 @@ export class DeliveryStateMachine {
       if (!claimToken || batch.activeRefillClaimToken !== claimToken) {
         throw new Error('Day batch refill claim is no longer owned');
       }
-      if (batch.refillCount >= 1) throw new Error('Day batch refill limit was already reached');
       const existingItems = tx.query('batch_items', { batchId }, {
         orderBy: 'createdAt', direction: 'asc', limit: 1_000,
       });
@@ -1151,28 +1181,37 @@ export class DeliveryStateMachine {
         }, { expectedVersion: 0 });
         nextPosition += 1;
       }
-      const degraded = sourceHealth?.degraded === true;
-      const knownHealthy = sourceHealth?.exhaustionEligible === true;
-      const failedCount = degraded ? Math.min(maxFailedRefills, batch.refillFailureCount + 1) : batch.refillFailureCount;
-      const successfulRefill = knownHealthy;
-      const exhausted = knownHealthy && deliveries.length === 0;
+      const refillCount = Number(batch.refillCount ?? 0);
+      const failures = scanFailed ? Math.min(MAX_SCAN_FAILURE_STREAK, Number(batch.refillFailureCount ?? 0) + 1) : 0;
+      const delayMs = scanFailed ? Math.min(MAX_SCAN_BACKOFF_MS, 60_000 * (2 ** (failures - 1))) : intervalMs;
       return tx.put('day_batches', batchId, {
         ...batch,
-        sourceHealth,
-        refillCount: successfulRefill ? batch.refillCount + 1 : batch.refillCount,
-        refillFailureCount: failedCount,
+        sourceHealth: sourceHealth ?? batch.sourceHealth ?? null,
+        refillCount: scanFailed ? refillCount : refillCount + 1,
+        refillFailureCount: failures,
         activeRefillClaimToken: null,
         refillDeadlineAt: null,
-        nextRefillAt: degraded
-          ? new Date(now.getTime() + Math.min(60 * 60_000, 60_000 * (2 ** Math.max(0, failedCount - 1)))).toISOString()
-          : null,
-        exhausted,
+        nextRefillAt: new Date(now.getTime() + delayMs).toISOString(),
+        exhausted: false,
         updatedAt: now.toISOString(),
       }, { expectedVersion: batch.version });
     });
   }
 
   async getDayBatch(batchId) { return this.store.get('day_batches', batchId); }
+
+  /** Read this channel's deliveries of any state or trigger for the given publishing days. */
+  async listDeliveriesForPublishingDays(publishingDays) {
+    if (!Array.isArray(publishingDays)) throw new Error('Publishing days must be an array');
+    const deliveries = [];
+    for (const publishingDay of new Set(publishingDays.map(day => requiredString(day, 'publishingDay')))) {
+      deliveries.push(...await this.store.query('deliveries', {
+        channelId: this.channelId,
+        publishingDay,
+      }, { orderBy: 'createdAt', direction: 'desc', limit: RECENT_DELIVERY_LOOKUP_LIMIT }));
+    }
+    return deliveries;
+  }
   async listBatchItems(batchId) {
     return (await this.store.query('batch_items', { batchId }, {
       orderBy: 'createdAt', direction: 'asc', limit: 1_000,

@@ -202,7 +202,12 @@ export class ChannelDeliveryCoordinator extends DurableObject {
         articleLimit: request.limit ?? undefined,
       };
       result = channel.mode === 'drip'
-        ? await engine.runDrip({ ...options, batchSize: request.singleMutation ? 1 : channel.batchSize || 5, delayMs: channel.delayMs ?? 0 })
+        ? await engine.runDrip({
+          ...options,
+          batchSize: request.singleMutation ? 1 : channel.batchSize || 5,
+          delayMs: channel.delayMs ?? 0,
+          ...(channel.dailyLimit !== undefined && { dailyLimit: channel.dailyLimit }),
+        })
         : await engine.run(options);
     } catch (error) {
       const sanitizedError = sanitizeError(error);
