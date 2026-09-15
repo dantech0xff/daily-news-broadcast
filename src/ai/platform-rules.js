@@ -73,12 +73,12 @@ https://blog.cloudflare.com/introducing-agent-lee/
 - Include article URL
 - End with 2-3 relevant hashtags
 - Punchy, one key insight only
-- End with "— Dan Tech Daily News"
+- End with "— Dan Tech Content Radar"
 - Avoid performative controversy or one-sided framing unless the article strongly supports it`,
     examples: `EXAMPLE TONE (learn style, DON'T copy):
 
 ---
-Cloudflare kéo AI agents về Workers stack với Agent Lee: KV/D1/R2 chung flow, ít glue code hơn. Team IT nên nhìn vào cost, ops và lock-in. blog.cloudflare.com/agent-lee/ — Dan Tech Daily News #cloudflare #ai
+Cloudflare kéo AI agents về Workers stack với Agent Lee: KV/D1/R2 chung flow, ít glue code hơn. Team IT nên nhìn vào cost, ops và lock-in. blog.cloudflare.com/agent-lee/ — Dan Tech Content Radar #cloudflare #ai
 ---`,
   },
 
@@ -88,7 +88,7 @@ Cloudflare kéo AI agents về Workers stack với Agent Lee: KV/D1/R2 chung flo
 - Max 500 characters
 - Vietnglish casual, like sharing with IT peers
 - Include article URL on its own line
-- End with "— Dan Tech Daily News"
+- End with "— Dan Tech Content Radar"
 - Emoji: 0-2, natural placement only
 - Avoid sounding like a launch announcement`,
     examples: `EXAMPLE TONE (learn style, DON'T copy):
@@ -97,7 +97,7 @@ Cloudflare kéo AI agents về Workers stack với Agent Lee: KV/D1/R2 chung flo
 Cloudflare vừa ra Agent Lee. Cái đáng để ý là họ đang gom runtime, storage và edge vào một flow cho AI agents, thay vì để team tự wire từng mảnh. Với IT teams, đây là bài toán tradeoff giữa tốc độ triển khai, vận hành và lock-in.
 
 blog.cloudflare.com/agent-lee/
-— Dan Tech Daily News
+— Dan Tech Content Radar
 ---`,
   },
 
@@ -109,7 +109,7 @@ blog.cloudflare.com/agent-lee/
 - Summarize the key insight with one concrete implication
 - End with a question only if it is specific and useful
 - Link on its own line
-- End with "— Dan Tech Daily News"`,
+- End with "— Dan Tech Content Radar"`,
     examples: `EXAMPLE TONE (learn style, DON'T copy):
 
 ---
@@ -118,7 +118,7 @@ Cloudflare vừa ra mắt Agent Lee, một flow mới để build AI agents trê
 Với team IT, tradeoff giữa tốc độ triển khai, chi phí vận hành và lock-in nên được cân nhắc thế nào?
 
 blog.cloudflare.com/agent-lee/
-— Dan Tech Daily News
+— Dan Tech Content Radar
 ---`,
   },
 };

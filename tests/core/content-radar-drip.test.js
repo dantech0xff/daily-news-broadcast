@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { NewsEngine } from '../../src/core/engine.js';
+import { ContentRadar } from '../../src/core/engine.js';
 import { DeliveryStateMachine } from '../../src/core/delivery-state-machine.js';
 import { MemoryDeliveryStore } from '../../src/core/delivery-store.js';
 import { RecordingAI, RecordingOutput, RecordingSource } from '../helpers/fakes.js';
@@ -22,7 +22,7 @@ test('drip keeps a failed item durably blocked instead of shifting it away', asy
       meta: { deliveryState: 'definitive_failure', retryDisposition: 'manual', sanitizedError: 'rejected' },
     }],
   });
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(new RecordingAI('hook'))
     .addOutput(output)
@@ -46,7 +46,7 @@ test('a blocked drip item does not starve a later runnable item', async () => {
       meta: { deliveryState: 'definitive_failure', retryDisposition: 'manual', sanitizedError: 'rejected' },
     }],
   });
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([article, secondArticle]))
     .useAI(new RecordingAI('hook'))
     .addOutput(output)
@@ -66,7 +66,7 @@ test('a blocked drip item does not starve a later runnable item', async () => {
 test('drip preview is mode-aware and does not create a day batch', async () => {
   const store = new MemoryDeliveryStore({ durable: true });
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(new RecordingAI('hook'))
     .addOutput(output)
@@ -82,7 +82,7 @@ test('drip preview is mode-aware and does not create a day batch', async () => {
 test('drip performs one bounded healthy refill and records proven exhaustion', async () => {
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new RecordingSource([article], { status: 'success', articleCount: 1 });
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(new RecordingOutput())
@@ -103,7 +103,7 @@ test('drip performs one bounded healthy refill and records proven exhaustion', a
 test('degraded refill enters bounded backoff and never claims exhaustion', async () => {
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new RecordingSource([article], { status: 'success', articleCount: 1 });
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(new RecordingOutput())
@@ -137,7 +137,7 @@ test('only one concurrent run may fetch and commit a day-batch refill', async ()
 
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new BlockingSource([article], { status: 'success', articleCount: 1 });
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(new RecordingOutput())
@@ -173,7 +173,7 @@ test('source configuration drift invalidates an exhausted day batch', async () =
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new MutableTopologySource([article], { status: 'success', articleCount: 1 });
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(output)
@@ -198,7 +198,7 @@ test('source selection policy drift invalidates an exhausted day batch', async (
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new RecordingSource([article], { status: 'success', articleCount: 1 });
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(output)
@@ -223,7 +223,7 @@ test('restart adopts initial same-day deliveries persisted before batch linkage'
   const source = new RecordingSource([article], { status: 'success', articleCount: 1 });
   const initialOutput = new RecordingOutput();
   const clock = () => new Date('2026-07-20T08:00:00.000Z');
-  const interrupted = new NewsEngine()
+  const interrupted = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(initialOutput)
@@ -236,7 +236,7 @@ test('restart adopts initial same-day deliveries persisted before batch linkage'
   assert.equal((await store.list('batch_items')).length, 0);
 
   const recoveredOutput = new RecordingOutput();
-  const recovered = new NewsEngine()
+  const recovered = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(recoveredOutput)
@@ -253,7 +253,7 @@ test('restart adopts refill deliveries persisted before refill linkage and close
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new RecordingSource([article], { status: 'success', articleCount: 1 });
   const clock = () => new Date('2026-07-20T08:00:00.000Z');
-  const initial = new NewsEngine()
+  const initial = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(new RecordingOutput())
@@ -274,7 +274,7 @@ test('restart adopts refill deliveries persisted before refill linkage and close
   assert.equal((await store.list('batch_items')).length, 1);
 
   const recoveredOutput = new RecordingOutput();
-  const recovered = new NewsEngine()
+  const recovered = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(recoveredOutput)
@@ -299,7 +299,7 @@ test('forced drip replay blocks same-provider destination drift before mutation'
       meta: { deliveryState: 'definitive_failure', retryDisposition: 'manual', sanitizedError: 'rejected' },
     }],
   });
-  const initial = new NewsEngine()
+  const initial = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(new RecordingAI('hook'))
     .addOutput(failedOutput)
@@ -313,7 +313,7 @@ test('forced drip replay blocks same-provider destination drift before mutation'
   assert.equal(first.status, 'failed');
 
   const changedOutput = new RecordingOutput({ key: 'recording:destination-b' });
-  const resumed = new NewsEngine()
+  const resumed = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(new RecordingAI('must-not-regenerate'))
     .addOutput(changedOutput)
@@ -332,7 +332,7 @@ test('forced drip replay blocks same-provider destination drift before mutation'
 test('forced drip uses a transient delivery and leaves the normal day batch unchanged', async () => {
   const store = new MemoryDeliveryStore({ durable: true });
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(new RecordingAI('hook'))
     .addOutput(output)
@@ -366,7 +366,7 @@ test('paused operator canary forwards the single-mutation guard without creating
     reason: 'offline canary test',
   });
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(new RecordingAI('hook'))
     .addOutput(output)
@@ -412,7 +412,7 @@ test('next-day drip resumes prior-day retryable delivery before fetching a new b
       },
     ],
   });
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(ai)
     .addOutput(output)
@@ -434,7 +434,7 @@ test('exact forced-drip replay stays bound to its persisted article selection', 
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new RecordingSource([article]);
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('forced hook'))
     .addOutput(output)
@@ -466,7 +466,7 @@ test('old forced-drip replay uses a compact tombstone without refetching or rese
   const store = new MemoryDeliveryStore({ durable: true });
   const source = new RecordingSource([article]);
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('private forced hook'))
     .addOutput(output)
@@ -510,7 +510,7 @@ test('concurrent first drip runs attach every prepared delivery to the winning d
   const store = new MemoryDeliveryStore({ durable: true });
   const outputA = new RecordingOutput({ key: 'telegram:shared-drip' });
   const outputB = new RecordingOutput({ key: 'telegram:shared-drip' });
-  const makeEngine = (source, output) => new NewsEngine()
+  const makeEngine = (source, output) => new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('hook'))
     .addOutput(output)

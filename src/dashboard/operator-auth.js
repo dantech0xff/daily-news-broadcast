@@ -42,7 +42,7 @@ export function requireDashboardRole(auth, requiredRole) {
     const presented = parseBasic(req.headers.authorization);
     const role = presented ? authenticate(auth, presented) : null;
     if (!role) {
-      res.set('WWW-Authenticate', 'Basic realm="NewsEngine", charset="UTF-8"');
+      res.set('WWW-Authenticate', 'Basic realm="Content Radar", charset="UTF-8"');
       return res.status(401).json({ error: 'Authentication required' });
     }
     if (requiredRole === 'operator' && role !== 'operator') {

@@ -43,7 +43,7 @@ async function fetchOgImage(url, externalSignal) {
   try {
     const res = await fetch(url, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'NewsEngine/2.0' },
+      headers: { 'User-Agent': 'ContentRadar/2.0' },
     });
 
     if (!res.ok) {

@@ -119,7 +119,7 @@ function Header() {
   return html`
     <header class="header">
       <div class="header-logo" onClick=${() => navigate('/')}>
-        <span>📡</span> NewsEngine
+        <span>📡</span> Content Radar
       </div>
       <div style="font-size:12px;color:var(--text-dim)">
         Config-driven dashboard

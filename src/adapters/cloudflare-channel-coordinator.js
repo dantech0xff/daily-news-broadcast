@@ -2,8 +2,8 @@ import { DurableObject } from 'cloudflare:workers';
 
 import {
   CloudflareKVCache,
+  ContentRadar,
   DeliveryStateMachine,
-  NewsEngine,
   PrefixedCache,
   SQLiteDeliveryStore,
   buildOutputTopology,
@@ -646,7 +646,7 @@ export class ChannelDeliveryCoordinator extends DurableObject {
   _buildEngine(channel) {
     const rawCache = new CloudflareKVCache(this.env.NEWS_CACHE, { required: true });
     const cache = new PrefixedCache(rawCache, `news:${channel.id}`);
-    const engine = new NewsEngine();
+    const engine = new ContentRadar();
     for (const source of channel.sources) engine.addSource(source);
     if (channel.ai) engine.useAI(channel.ai);
     for (const output of channel.outputs ?? [channel.output]) engine.addOutput(output);

@@ -56,7 +56,7 @@ export class HTMLScraperSource extends SourcePlugin {
 
       const response = await fetch(this._config.url, {
         signal: options.signal,
-        headers: { 'User-Agent': 'NewsEngine/2.0', 'Accept': 'text/html' },
+        headers: { 'User-Agent': 'ContentRadar/2.0', 'Accept': 'text/html' },
       });
       if (!response.ok) {
         await discardSourceResponse(response);

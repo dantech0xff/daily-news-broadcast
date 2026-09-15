@@ -60,7 +60,7 @@ export class GitHubTrendingSource extends SourcePlugin {
       const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=stars&order=desc&per_page=${limit}`;
 
       const headers = {
-        'User-Agent': 'NewsEngine/2.0',
+        'User-Agent': 'ContentRadar/2.0',
         'Accept': 'application/vnd.github.v3+json',
       };
       if (token) headers['Authorization'] = `token ${token}`;

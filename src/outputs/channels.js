@@ -23,14 +23,14 @@ export class SlackOutput extends OutputPlugin {
    * @param {Object} config
    * @param {string} config.webhookUrl - Slack Incoming Webhook URL
    * @param {string} [config.channel] - Override channel
-   * @param {string} [config.username='Tech News Bot']
-   * @param {string} [config.iconEmoji=':newspaper:']
+   * @param {string} [config.username='Content Radar']
+   * @param {string} [config.iconEmoji=':satellite_antenna:']
    */
   constructor(config, dependencies = {}) {
     super();
     this._config = {
-      username: 'Tech News Bot',
-      iconEmoji: ':newspaper:',
+      username: 'Content Radar',
+      iconEmoji: ':satellite_antenna:',
       ...config,
     };
     this._dependencies = createOutputDependencies(config, dependencies);
@@ -67,11 +67,11 @@ export class DiscordOutput extends OutputPlugin {
   /**
    * @param {Object} config
    * @param {string} config.webhookUrl - Discord Webhook URL
-   * @param {string} [config.username='Tech News Bot']
+   * @param {string} [config.username='Content Radar']
    */
   constructor(config, dependencies = {}) {
     super();
-    this._config = { username: 'Tech News Bot', ...config };
+    this._config = { username: 'Content Radar', ...config };
     this._dependencies = createOutputDependencies(config, dependencies);
     this._deliveryKey = destinationDeliveryKey('discord', config.webhookUrl, config.deliveryKey);
   }

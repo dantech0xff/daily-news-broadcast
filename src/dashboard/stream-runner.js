@@ -1,11 +1,11 @@
 /**
- * Stream Runner — Builds NewsEngine from stream config JSON, executes pipeline
+ * Stream Runner — Builds ContentRadar from stream config JSON, executes pipeline
  * Supports $ENV_VAR references in config values (resolved at runtime).
  */
 
 import {
+  ContentRadar,
   DeliveryStateMachine,
-  NewsEngine,
   PrefixedCache,
   buildOutputTopology,
   normalizeSendResult,
@@ -165,7 +165,7 @@ function createOutput(config) {
 // ============================================
 
 export function buildEngine(streamConfig, dependencies = {}) {
-  const { cache, deliveryStore, clock, env = process.env, engineFactory = () => new NewsEngine() } = dependencies;
+  const { cache, deliveryStore, clock, env = process.env, engineFactory = () => new ContentRadar() } = dependencies;
   if (!cache) throw new Error('Dashboard buildEngine requires a shared cache');
   if (!deliveryStore) throw new Error('Dashboard buildEngine requires a shared delivery store');
   const resolvedStream = validateStreamConfig(streamConfig, env);

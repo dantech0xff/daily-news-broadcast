@@ -47,7 +47,7 @@ export class RedditSource extends SourcePlugin {
       const { limit = 10, since } = options;
       const { subreddit, sort, minUpvotes } = this._config;
       const url = `https://www.reddit.com/r/${subreddit}/${sort}.json?limit=${limit * 3}&raw_json=1`;
-      const headers = { 'User-Agent': 'NewsEngine/2.0 (tech news aggregator)' };
+      const headers = { 'User-Agent': 'ContentRadar/2.0 (tech content radar)' };
 
       let response = await fetch(url, { headers, signal: options.signal });
 

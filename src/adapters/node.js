@@ -780,7 +780,7 @@ function fail(logger, message) {
 
 function helpText() {
   return `
-🔥 NewsEngine — Node.js Adapter
+📡 Content Radar — Node.js Adapter
 
   node src/adapters/node.js <command> [options]
 

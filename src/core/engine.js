@@ -21,7 +21,7 @@ const AUTOMATIC_DELIVERY_STATES = new Set([
   'pending_generation', 'generation_retry_pending', 'ready', 'partial_retryable',
 ]);
 
-export class NewsEngine {
+export class ContentRadar {
   constructor() {
     this.sources = [];
     this.ai = null;

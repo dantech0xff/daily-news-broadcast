@@ -42,7 +42,7 @@ export function createDashboardApp({
   });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ service: 'newsengine-dashboard', status: 'ok', time: new Date().toISOString(), version, channelCount: scheduler.listStreams().length });
+    res.json({ service: 'content-radar-dashboard', status: 'ok', time: new Date().toISOString(), version, channelCount: scheduler.listStreams().length });
   });
 
   app.get('/api/events', trigger, (req, res) => {
