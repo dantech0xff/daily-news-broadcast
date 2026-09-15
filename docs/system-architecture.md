@@ -2,14 +2,14 @@
 
 ## Overview
 
-NewsEngine is a composable delivery engine. Sources, AI providers, outputs, and caches are plugins. Delivery correctness now depends on a durable state machine and a durable store, not on best-effort cache writes.
+Content Radar is a composable delivery engine that scans technology content and posts it to social channels. Sources, AI providers, outputs, and caches are plugins. Delivery correctness now depends on a durable state machine and a durable store, not on best-effort cache writes.
 
 ## Topology
 
 ```text
 Node CLI / Dashboard / Cloudflare Worker
   -> channel definitions
-  -> NewsEngine
+  -> ContentRadar
   -> DeliveryStateMachine
   -> delivery store
   -> output plugins
@@ -26,11 +26,12 @@ The runtime entry points are:
 1. Fetch all sources in bounded batches.
 2. Collect source diagnostics and classify failures separately from empty feeds.
 3. Deduplicate against delivery state and legacy compatibility data.
-4. Apply middlewares such as scoring and semantic dedup.
-5. Summarize with AI.
-6. Claim one output at a time in configured topology order.
-7. Commit each output result durably before the next output attempt starts.
-8. Mark article and maintenance state only after successful completion.
+4. For radar scans (drip mode only), exclude articles covering a story already delivered to the channel in the current or previous publishing day.
+5. Apply middlewares: a technology-relevance gate, then scoring and semantic dedup.
+6. Summarize with AI.
+7. Claim one output at a time in configured topology order.
+8. Commit each output result durably before the next output attempt starts.
+9. Mark article and maintenance state only after successful completion.
 
 The pipeline never claims exactly-once delivery. It provides bounded, operator-assisted recovery.
 
@@ -118,7 +119,9 @@ Important details:
 - `BROADCAST_MODE` controls `digest` vs `drip`
 - `CRON_SCHEDULE` and the per-channel cron overrides are exact five-field expressions
 - source fetches are batched, but channel execution is sequential
-- drip mode can carry unresolved work across days and can refill once when source health allows
+- drip mode is a continuous radar: it carries unresolved work across days, and re-scans sources whenever the batch has open slots under the channel's daily limit (`DRIP_DAILY_LIMIT`, default 18) and its scan interval has elapsed (default 15 minutes, which only throttles back-to-back scans)
+- each scan runs under a renewable lease, so a claim lost mid-scan creates no deliveries; a scan counts as failed only when no source is healthy or it throws, and failures back off exponentially, capped at an hour, without blocking articles already queued
+- `preview` never applies the daily limit or story-coverage exclusion; it stays read-only in every mode
 
 ## Security Model
 

@@ -1,6 +1,6 @@
-# NewsEngine
+# Content Radar
 
-Plugin-based news aggregation engine. It fetches articles from any source, summarizes them with any AI provider, and sends the result to any output channel.
+Content Radar scans technology content from swappable sources, summarizes it with AI, and posts the result to social channels. Telegram delivery is active by default; X, Facebook, and Threads outputs exist and turn on once their channel-specific environment variables are set.
 
 Current delivery model:
 
@@ -69,7 +69,10 @@ Force semantics are explicit:
 - Telegram single-article news posts use a short standard photo caption, target 2–3 summary sentences, and preserve the full source link. Normal captions are capped at 700 characters; links or image content that cannot fit a Telegram caption use the standard photo-plus-text flow. Rich messages are not used.
 - After each output send, the state machine commits the result before the next output starts.
 - Failures become classified states such as retryable, manual-retry-required, ambiguous, or exhausted.
-- Drip mode persists a day batch, can carry unresolved items across days, and supports one bounded refill when source health allows it.
+- Drip mode is a continuous radar: it persists a day batch, can carry unresolved items across days, and scans sources again whenever the batch has open slots under the channel's daily limit (`DRIP_DAILY_LIMIT`, Telegram default 18) and its scan interval has elapsed (default 15 minutes, which only throttles back-to-back scans). A scan runs under a renewable claim; losing that claim mid-scan creates no deliveries. A scan counts as failed only when no source is healthy or it throws, and failures back off (capped at an hour) without blocking articles already queued.
+- Radar scans skip stories already covered by this channel's deliveries from the current or previous publishing day, and queue at most one article per story. See [`src/core/story-dedup.js`](./src/core/story-dedup.js) for the matching rules.
+- The technology-relevance gate ([`src/core/tech-relevance.js`](./src/core/tech-relevance.js)) is a topic filter, not a trust boundary — it does not vet link safety. Community articles from Reddit and Hacker News keep their original external link (accepted risk).
+- `preview` never applies the daily limit or story-coverage exclusion, and stays read-only in every mode. Each scan fetches every configured source (with retries) plus up to `maxArticlesPerSource` og:image lookups per RSS/Hacker News source (production default 3).
 - Legacy `seen:*` and digest compatibility data are read conservatively and preserved during migration.
 - Pausing blocks new claims. It does not cancel an external call that has already been issued.
 - Cloudflare hot paths use physical per-domain SQLite tables and indexed bounded queries; the generic record table is retained only for schema migration and non-domain compatibility.
@@ -81,12 +84,12 @@ Before upgrading an existing local file store to the unique-owner lock protocol,
 ## Library Example
 
 ```javascript
-import { NewsEngine, FileCache, LocalFileDeliveryStore } from './src/core/index.js';
+import { ContentRadar, FileCache, LocalFileDeliveryStore, createTechRelevanceMiddleware } from './src/core/index.js';
 import { bigTechBlogs } from './src/presets/index.js';
 import { ClaudeAI } from './src/ai/index.js';
 import { TelegramOutput } from './src/outputs/index.js';
 
-const engine = new NewsEngine()
+const engine = new ContentRadar()
   .addSource(...bigTechBlogs())
   .useAI(new ClaudeAI({ apiKey: process.env.ANTHROPIC_API_KEY }))
   .addOutput(new TelegramOutput({
@@ -95,6 +98,7 @@ const engine = new NewsEngine()
   }))
   .useCache(new FileCache(process.env.CACHE_PATH))
   .useDeliveryStore(new LocalFileDeliveryStore(process.env.DELIVERY_STORE_PATH))
+  .use(createTechRelevanceMiddleware())
   .configure({
     channelId: 'telegram-main',
     language: 'vi',
@@ -206,7 +210,17 @@ See `.env.example` for the full list. The important groups are:
 - cache and delivery-store paths
 - Cloudflare runtime mode and secrets
 - dashboard auth, origin, TLS, and proxy controls
-- drip batch sizing and timeout tuning
+- drip batch sizing, `DRIP_DAILY_LIMIT` (Telegram radar's daily article limit, default 18; other channels use fixed limits), and timeout tuning
+
+## Kept Production Identifiers
+
+The Content Radar rename is code- and docs-level only. These production identifiers are unchanged on purpose; renaming any of them is a breaking deploy, not a cosmetic edit:
+
+- The Cloudflare Worker name `news-engine` and its `workers.dev` hostname (see `docs/deployment.md`) — a new Worker name provisions a new Durable Object namespace, which loses all durable delivery state and risks duplicate posts.
+- `AI_GATEWAY_ID=news-engine`, the `NEWS_CACHE` / `NEWS_COORDINATOR` bindings, and the `NEWS_RUNTIME_MODE` / `NEWS_DEFAULT_PAUSED` / `NEWS_BUILD_VERSION` env vars.
+- The `news:{channelId}` cache/KV key prefix and the `news_schema_migrations` migration table — changing either loses dedup history and can repost already-delivered articles.
+- The local cache file `.cache/news.json` and the `news-engine` Docker Compose service and image tag.
+- The test-only network markers `X-NewsEngine-Network` and `*.newsengine.invalid`.
 
 ## Dependencies
 

@@ -1,14 +1,15 @@
-# Project Overview - NewsEngine
+# Project Overview - Content Radar
 
 ## Summary
 
-NewsEngine is a plugin-based news delivery engine. It fetches articles from swappable sources, summarizes them with a configurable AI provider, and sends the result through swappable outputs. The current implementation is delivery-state driven: content generation, output sending, recovery, and maintenance replay all flow through a durable state machine.
+Content Radar is a plugin-based engine that actively scans technology content from swappable sources, filters it for technology relevance, summarizes it with a configurable AI provider, and sends the result through swappable outputs. The current implementation is delivery-state driven: content generation, output sending, recovery, and maintenance replay all flow through a durable state machine.
 
 ## Product Goal
 
-Deliver curated news digests that are:
+Actively scan and deliver curated technology content that is:
 
 - configurable by source, model, output, schedule, and audience
+- filtered for technology relevance before it reaches AI summarization or an output channel
 - safe to retry after crashes, timeouts, or partial provider mutation
 - observable through the Worker, CLI, and dashboard
 - deployable on Node.js or Cloudflare Workers without changing the core engine
@@ -35,8 +36,9 @@ Deliver curated news digests that are:
 5. `preview` is read-only and must not mutate delivery state.
 6. Cloudflare manual trigger, force, canary, and recovery routes must use distinct trigger/operator authority.
 7. Operator recovery must be idempotent and versioned.
-8. Drip mode must preserve queue state across days and support bounded refill.
-9. Aggregate status must expose a durable last-request pointer, source/queue/unresolved warnings, and paginated redacted records; exact request status must remain pollable after retention compaction.
+8. Drip mode must preserve queue state across days and re-scan sources for new content whenever the batch has open slots, the channel's daily limit is not reached, and a scan is due; a failed scan must back off without blocking items already queued.
+9. Every collected article must pass a technology-relevance gate — a topic filter, not a trust boundary — before AI summarization; radar scans must also skip articles covering a story already delivered to the channel in the current or previous publishing day.
+10. Aggregate status must expose a durable last-request pointer, source/queue/unresolved warnings, and paginated redacted records; exact request status must remain pollable after retention compaction.
 
 ### Non-Functional
 
@@ -69,6 +71,8 @@ The Cloudflare schema uses physical domain tables plus `news_schema_migrations`.
 - Quiesced mode performs no delivery mutation.
 - Token maintenance is a separate switch and does not ride on delivery resume.
 - X delivery topology requires the non-secret authenticated `X_DESTINATION_ID`.
+- Community-sourced articles (Reddit, Hacker News) keep their original external link; the technology-relevance gate filters by topic only, not link safety (accepted risk).
+- `preview` never applies the drip daily limit or story-coverage exclusion.
 
 ## Rollout Policy
 
