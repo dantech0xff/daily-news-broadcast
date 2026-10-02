@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { MemoryCache } from '../../src/core/caches.js';
-import { NewsEngine } from '../../src/core/engine.js';
+import { ContentRadar } from '../../src/core/engine.js';
 import { MemoryDeliveryStore } from '../../src/core/delivery-store.js';
 import { TelegramOutput } from '../../src/outputs/telegram.js';
 import { RecordingAI, RecordingSource } from '../helpers/fakes.js';
@@ -62,7 +62,7 @@ test('engine preserves the single-mutation guard and never truncates an oversize
     createdAt: now,
     updatedAt: now,
   }, { expectedVersion: 0 }));
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([{
       id: 'canary-article',
       title: 'Canary article',

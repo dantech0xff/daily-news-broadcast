@@ -1,13 +1,14 @@
 /**
  * Channel runner — iterates channels, runs due ones sequentially
- * Each channel creates its own NewsEngine instance with namespaced cache
+ * Each channel creates its own ContentRadar instance with namespaced cache
  */
 
 import {
-  NewsEngine,
+  ContentRadar,
   PrefixedCache,
   createScoringMiddleware,
   createSemanticDedupMiddleware,
+  createTechRelevanceMiddleware,
   opaqueId,
   sanitizeError,
 } from '../core/index.js';
@@ -214,11 +215,11 @@ function datePartsInTimezone(now, timezone) {
 }
 
 /**
- * Build a NewsEngine instance for a single channel
+ * Build a ContentRadar instance for a single channel
  * Shared by runner, and adapters for /preview, /queue endpoints
  * @param {Object} ch - ChannelConfig
  * @param {import('../core/contracts.js').CachePlugin} cache - raw cache (will be prefixed)
- * @returns {NewsEngine}
+ * @returns {ContentRadar}
  */
 export function buildEngine(ch, cacheOrDependencies, additionalDependencies = {}) {
   const dependencies = cacheOrDependencies?.cache
@@ -226,12 +227,13 @@ export function buildEngine(ch, cacheOrDependencies, additionalDependencies = {}
     : { ...additionalDependencies, cache: cacheOrDependencies };
   const { cache, deliveryStore, clock } = dependencies;
   const prefixed = new PrefixedCache(cache, `news:${ch.id}`);
-  const engine = new NewsEngine();
+  const engine = new ContentRadar();
   for (const src of ch.sources) engine.addSource(src);
   if (ch.ai) engine.useAI(ch.ai);
   engine.addOutput(ch.output);
   engine.useCache(prefixed);
   if (deliveryStore) engine.useDeliveryStore(deliveryStore);
+  engine.use(createTechRelevanceMiddleware());
   engine.use(createScoringMiddleware({ maxArticles: ch.maxArticles || 12 }));
   engine.use(createSemanticDedupMiddleware());
   engine.configure({
@@ -298,7 +300,12 @@ export async function runChannels(channels, options = {}) {
         requestedAt: now,
       };
       const result = ch.mode === 'drip'
-        ? await engine.runDrip({ batchSize: ch.batchSize || 5, delayMs: ch.delayMs ?? 0, ...runOptions })
+        ? await engine.runDrip({
+          batchSize: ch.batchSize || 5,
+          delayMs: ch.delayMs ?? 0,
+          ...(ch.dailyLimit !== undefined && { dailyLimit: ch.dailyLimit }),
+          ...runOptions,
+        })
         : await engine.run(runOptions);
 
       const ms = Date.now() - start;

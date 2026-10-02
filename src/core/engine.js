@@ -10,6 +10,11 @@ import {
 } from './delivery.js';
 import { assertDeliveryStore } from './delivery-store.js';
 import { DeliveryStateMachine } from './delivery-state-machine.js';
+import { excludeCoveredStories, pickDistinctStories } from './story-dedup.js';
+
+const DEFAULT_DRIP_DAILY_LIMIT = 18;
+const DEFAULT_SCAN_INTERVAL_MINUTES = 15;
+const DAY_MS = 24 * 60 * 60 * 1_000;
 
 const NON_TERMINAL_DELIVERY_STATES = new Set([
   'pending_generation', 'generating', 'generation_retry_pending',
@@ -21,7 +26,7 @@ const AUTOMATIC_DELIVERY_STATES = new Set([
   'pending_generation', 'generation_retry_pending', 'ready', 'partial_retryable',
 ]);
 
-export class NewsEngine {
+export class ContentRadar {
   constructor() {
     this.sources = [];
     this.ai = null;
@@ -221,6 +226,7 @@ export class NewsEngine {
 
     let articles = delivery?.articleSnapshot ?? reservationClaim?.reservation?.articleSnapshot ?? null;
     sourceHealth = reservationClaim?.reservation?.sourceHealth ?? sourceHealth;
+    let selection = null;
     if (!articles) {
       const prepared = await this._prepareArticles({
         force,
@@ -229,6 +235,7 @@ export class NewsEngine {
       });
       articles = prepared.articles;
       sourceHealth = prepared.sourceHealth;
+      selection = prepared.selection;
       if (articles.length === 0) {
         if (!dryRun && reservationId && reservationClaim?.claimToken) {
           await machine.completeDeliveryReservation(reservationId, reservationClaim.claimToken, {
@@ -237,7 +244,7 @@ export class NewsEngine {
             sourceHealth,
           });
         }
-        return emptySourceResult({ publishingDay, sourceHealth, dryRun });
+        return withSelection(emptySourceResult({ publishingDay, sourceHealth, dryRun }), selection);
       }
       if (dryRun) {
         const generated = await this._summarize(articles, 'digest');
@@ -247,7 +254,7 @@ export class NewsEngine {
           content: generated.text,
           sourceHealth,
           aiUsage: generated.usage ?? null,
-          stats: this._stats(articles.length, Date.now() - startedAt.getTime()),
+          stats: { ...this._stats(articles.length, Date.now() - startedAt.getTime()), selection },
           outputs: [],
         };
       }
@@ -315,7 +322,7 @@ export class NewsEngine {
     });
     if (result.status === 'success') result.maintenance = await this._drainMaintenance(machine);
     result.publishingDay = publishingDay;
-    return result;
+    return withSelection(result, selection);
   }
 
   async runDrip(runOptions = {}) {
@@ -336,7 +343,10 @@ export class NewsEngine {
     if (dryRun) {
       const prepared = await this._prepareArticles({ force, dryRun: true });
       if (prepared.articles.length === 0) {
-        return emptySourceResult({ publishingDay, sourceHealth: prepared.sourceHealth, dryRun: true });
+        return withSelection(
+          emptySourceResult({ publishingDay, sourceHealth: prepared.sourceHealth, dryRun: true }),
+          prepared.selection,
+        );
       }
       const selected = prepared.articles.slice(0, batchSize);
       const items = [];
@@ -350,7 +360,11 @@ export class NewsEngine {
         publishingDay,
         articles: items,
         sourceHealth: prepared.sourceHealth,
-        stats: { ...this._stats(selected.length, Date.now() - startedAt.getTime()), mode: 'drip' },
+        stats: {
+          ...this._stats(selected.length, Date.now() - startedAt.getTime()),
+          mode: 'drip',
+          selection: prepared.selection,
+        },
       };
     }
 
@@ -383,6 +397,14 @@ export class NewsEngine {
         delayMs,
       });
     }
+    // Radar scan policy applies only to ordinary drip runs, never to preview, force, or carryover.
+    const dailyLimit = integerInRange(runOptions.dailyLimit ?? DEFAULT_DRIP_DAILY_LIMIT, 'dailyLimit', 1, 500);
+    const scanIntervalMs = integerInRange(
+      runOptions.scanIntervalMinutes ?? DEFAULT_SCAN_INTERVAL_MINUTES,
+      'scanIntervalMinutes',
+      1,
+      1_440,
+    ) * 60_000;
     const topologyFingerprint = await opaqueId(
       'source-topology',
       ...this.sources.map(source => source.sourceKey),
@@ -407,85 +429,37 @@ export class NewsEngine {
     }
 
     if (!batch) {
-      const prepared = await this._prepareArticles({ force: false, dryRun: false });
-      sourceHealth = prepared.sourceHealth;
-      if (prepared.articles.length === 0 && !sourceHealth.exhaustionEligible) {
-        return emptySourceResult({ publishingDay, sourceHealth, dryRun: false });
-      }
-      const deliveries = await this._prepareDripDeliveries(machine, prepared.articles, publishingDay);
       batch = await machine.ensureDayBatch({
         batchId,
         publishingDay,
         mode: 'drip',
         sourceTopologyFingerprint: topologyFingerprint,
-        sourceHealth,
-        deliveries,
-        exhausted: deliveries.length === 0 && sourceHealth.exhaustionEligible,
+        sourceHealth: null,
+        deliveries: [],
       });
     }
 
+    // Radar: scan again whenever slots are open, the daily limit allows it, and a scan is due.
     let items = await machine.listBatchItems(batchId);
-    let eligible = [];
-    let refillClaimReason = null;
-    for (const item of items) {
-      const current = await machine.getDelivery(item.deliveryId);
-      if (!current || !AUTOMATIC_DELIVERY_STATES.has(current.state)) continue;
-      eligible.push(item);
-      if (eligible.length >= batchSize) break;
-    }
-    const refillDue = !batch.nextRefillAt || new Date(batch.nextRefillAt) <= startedAt;
-    if (
-      eligible.length === 0
-      && !batch.exhausted
-      && batch.refillCount < 1
-      && batch.refillFailureCount < 3
-      && refillDue
-    ) {
-      const refillClaim = await machine.claimBatchRefill({
+    let eligible = await this._eligibleDripItems(machine, items, batchSize);
+    let scan = null;
+    if (eligible.length < batchSize && items.length < dailyLimit) {
+      scan = await this._scanDayBatch({
+        machine,
         batchId,
-        sourceTopologyFingerprint: topologyFingerprint,
+        publishingDay,
+        topologyFingerprint,
+        limit: Math.min(batchSize - eligible.length, dailyLimit - items.length),
+        scanIntervalMs,
       });
-      if (refillClaim.status === 'claimed') {
-        const refill = await this._prepareArticles({ force: false, dryRun: false });
-        sourceHealth = refill.sourceHealth;
-        const deliveries = await this._prepareDripDeliveries(machine, refill.articles, publishingDay);
-        batch = await machine.recordBatchRefill({
-          batchId,
-          claimToken: refillClaim.claimToken,
-          sourceTopologyFingerprint: topologyFingerprint,
-          sourceHealth,
-          deliveries,
-        });
-        items = await machine.listBatchItems(batchId);
-        eligible = [];
-        for (const item of items) {
-          const current = await machine.getDelivery(item.deliveryId);
-          if (!current || !AUTOMATIC_DELIVERY_STATES.has(current.state)) continue;
-          eligible.push(item);
-          if (eligible.length >= batchSize) break;
-        }
-      } else {
-        batch = refillClaim.batch;
-        sourceHealth = batch.sourceHealth ?? sourceHealth;
-        refillClaimReason = refillClaim.reason;
-      }
+      sourceHealth = scan.sourceHealth ?? sourceHealth;
+      items = await machine.listBatchItems(batchId);
+      eligible = await this._eligibleDripItems(machine, items, batchSize);
     }
     if (eligible.length === 0) {
-      const refillBlocked = refillClaimReason ?? (batch.refillFailureCount >= 3
-        ? 'refill_failure_limit_reached'
-        : batch.nextRefillAt && new Date(batch.nextRefillAt) > startedAt
-          ? 'refill_backoff'
-          : batch.refillCount >= 1
-            ? 'refill_limit_reached'
-            : null);
-      return {
-        status: 'skipped',
-        reason: batch.exhausted ? 'batch_exhausted' : refillBlocked ?? 'queue_empty',
-        mode: 'drip',
-        publishingDay,
-        sourceHealth,
-        stats: { ...this._stats(0, Date.now() - startedAt.getTime()), mode: 'drip', remaining: 0 },
-      };
+      return withSelection(this._idleDripResult({
+        scan, items, dailyLimit, publishingDay, sourceHealth, startedAt,
+      }), scan?.selection);
     }
 
     const itemResults = [];
@@ -506,19 +480,139 @@ export class NewsEngine {
     const status = aggregateItemStatuses(itemResults);
     if (status === 'success' || status === 'partial') await this._drainMaintenance(machine);
     const queue = await this.getQueue({ publishingDay });
-    return {
+    return withSelection({
       status,
       mode: 'drip',
       publishingDay,
       articles: itemResults,
       sourceHealth,
+      ...(scan?.error ? { scanError: scan.error } : {}),
       stats: {
         ...this._stats(itemResults.length, Date.now() - startedAt.getTime()),
         mode: 'drip',
         remaining: queue.remaining,
         blocked: queue.blocked,
       },
-    };
+    }, scan?.selection);
+  }
+
+  async _eligibleDripItems(machine, items, batchSize) {
+    const eligible = [];
+    for (const item of items) {
+      const current = await machine.getDelivery(item.deliveryId);
+      if (!current || !AUTOMATIC_DELIVERY_STATES.has(current.state)) continue;
+      eligible.push(item);
+      if (eligible.length >= batchSize) break;
+    }
+    return eligible;
+  }
+
+  /**
+   * Run one claimed radar scan of the day batch. It never throws: a failure is recorded
+   * with backoff so items that are already queued still deliver in this run.
+   */
+  async _scanDayBatch({ machine, batchId, publishingDay, topologyFingerprint, limit, scanIntervalMs }) {
+    const claim = await machine.claimBatchRefill({
+      batchId,
+      sourceTopologyFingerprint: topologyFingerprint,
+      leaseMs: this._scanLeaseMs(),
+    });
+    if (claim.status !== 'claimed') {
+      return { scanned: false, reason: claim.reason, sourceHealth: claim.batch?.sourceHealth ?? null };
+    }
+    let prepared = null;
+    const coverageDays = [publishingDay, previousPublishingDay(publishingDay)];
+    try {
+      const covered = coveredArticles(await machine.listDeliveriesForPublishingDays(coverageDays));
+      // Excluding covered stories before middlewares keeps look-alikes out of the scoring cut.
+      prepared = await this._prepareArticles({
+        force: false,
+        dryRun: false,
+        exclude: articles => excludeCoveredStories(articles, covered),
+      });
+      // Renew before creating deliveries: a scan that lost its claim must leave nothing behind.
+      const renewal = await machine.renewBatchRefillClaim({
+        batchId,
+        claimToken: claim.claimToken,
+        leaseMs: this._scanLeaseMs(),
+      });
+      if (renewal.status !== 'renewed') {
+        return {
+          scanned: false,
+          reason: 'refill_claim_lost',
+          sourceHealth: prepared.sourceHealth,
+          selection: prepared.selection,
+        };
+      }
+      // Forced drips do not take the scan claim, so re-read coverage after the fetch window.
+      const coveredNow = coveredArticles(await machine.listDeliveriesForPublishingDays(coverageDays));
+      const selected = pickDistinctStories(excludeCoveredStories(prepared.articles, coveredNow), limit);
+      const deliveries = await this._prepareDripDeliveries(machine, selected, publishingDay);
+      await machine.recordBatchRefill({
+        batchId,
+        claimToken: claim.claimToken,
+        sourceTopologyFingerprint: topologyFingerprint,
+        sourceHealth: prepared.sourceHealth,
+        deliveries,
+        scanIntervalMs,
+      });
+      return {
+        scanned: true,
+        sourceHealth: prepared.sourceHealth,
+        selection: { ...prepared.selection, enqueued: deliveries.length },
+      };
+    } catch (error) {
+      const sanitizedError = sanitizeError(error);
+      console.error('[Radar] Scan failed', {
+        channelId: this.options.channelId,
+        publishingDay,
+        error: sanitizedError,
+      });
+      try {
+        await machine.recordBatchRefill({
+          batchId,
+          claimToken: claim.claimToken,
+          sourceTopologyFingerprint: topologyFingerprint,
+          sourceHealth: prepared?.sourceHealth ?? null,
+          deliveries: [],
+          scanIntervalMs,
+          failed: true,
+        });
+      } catch {
+        // The claim is no longer owned; its lease expiry releases the scan instead.
+      }
+      return {
+        scanned: false,
+        reason: 'scan_failed',
+        error: sanitizedError,
+        sourceHealth: prepared?.sourceHealth ?? null,
+        selection: prepared?.selection ?? null,
+      };
+    }
+  }
+
+  /** A scan claim must outlast every sequential source batch, including retries. */
+  _scanLeaseMs() {
+    const concurrency = positiveInteger(this.options.concurrency, 'concurrency');
+    const attempts = nonNegativeInteger(this.options.maxRetries, 'maxRetries') + 1;
+    const perSourceMs = positiveInteger(this.options.sourceTimeoutMs, 'sourceTimeoutMs') + 1_000;
+    const sourceBatches = Math.max(1, Math.ceil(this.sources.length / concurrency));
+    return Math.max(
+      positiveInteger(this.options.attemptTimeoutMs, 'attemptTimeoutMs'),
+      sourceBatches * attempts * perSourceMs,
+    );
+  }
+
+  _idleDripResult({ scan, items, dailyLimit, publishingDay, sourceHealth, startedAt }) {
+    const stats = { ...this._stats(0, Date.now() - startedAt.getTime()), mode: 'drip', remaining: 0 };
+    if (scan?.error) {
+      return { status: 'failed', reason: 'scan_failed', error: scan.error, mode: 'drip', publishingDay, sourceHealth, stats };
+    }
+    if (scan?.scanned && sourceHealth) {
+      return { ...emptySourceResult({ publishingDay, sourceHealth, dryRun: false }), mode: 'drip', stats };
+    }
+    const reason = items.length >= dailyLimit ? 'daily_limit_reached' : scan?.reason ?? 'no_articles';
+    return { status: 'skipped', reason, mode: 'drip', publishingDay, sourceHealth, stats };
   }
 
   async _runForcedDrip({ machine, runOptions, publishingDay, startedAt }) {
@@ -544,6 +638,7 @@ export class NewsEngine {
       };
     }
     let sourceHealth = null;
+    let selection = null;
     let delivery = existing;
     let article = existing?.articleSnapshot?.[0] ?? (existing ? { title: null } : null);
     if (!delivery) {
@@ -553,11 +648,12 @@ export class NewsEngine {
         limit: runOptions.articleLimit,
       });
       sourceHealth = prepared.sourceHealth;
+      selection = prepared.selection;
       if (prepared.articles.length === 0) {
-        return {
+        return withSelection({
           ...emptySourceResult({ publishingDay, sourceHealth, dryRun: false }),
           mode: 'drip',
-        };
+        }, selection);
       }
       article = prepared.articles[0];
       delivery = await machine.prepareDelivery({
@@ -593,7 +689,7 @@ export class NewsEngine {
     });
     if (result.status === 'success') result.maintenance = await this._drainMaintenance(machine);
     const queue = await this.getQueue({ publishingDay });
-    return {
+    return withSelection({
       status: result.status,
       reason: result.reason,
       deliveryId: result.deliveryId,
@@ -608,7 +704,7 @@ export class NewsEngine {
         remaining: queue.remaining,
         blocked: queue.blocked,
       },
-    };
+    }, selection);
   }
 
   async _runDripCarryover({ machine, deliveries, publishingDay, startedAt, delayMs }) {
@@ -783,9 +879,9 @@ export class NewsEngine {
             signal,
           },
         ), outputTimeoutMs, `Output ${output.id}`);
-        normalized = normalizeSendResult(sent);
+        normalized = normalizeSendResult(sent, { now: this._captureInstant().getTime() });
       } catch (error) {
-        normalized = normalizeSendResult(null, { error });
+        normalized = normalizeSendResult(null, { error, now: this._captureInstant().getTime() });
       }
       try {
         const committed = await machine.commitOutput(claim.attempt.attemptId, normalized);
@@ -818,13 +914,25 @@ export class NewsEngine {
     });
   }
 
-  async _prepareArticles({ force, dryRun, limit }) {
+  async _prepareArticles({ force, dryRun, limit, exclude }) {
     const fetched = await this._fetchAllDetailed();
     let articles = fetched.articles;
+    // Per-run counts make over-filtering visible without exposing article content.
+    const selection = { fetched: articles.length };
     if (!force) articles = await this._dedup(articles, { dryRun });
-    for (const middleware of this.middlewares) articles = await middleware(articles);
+    selection.fresh = articles.length;
+    if (exclude) {
+      articles = exclude(articles);
+      selection.uncovered = articles.length;
+    }
+    selection.relevant = articles.length;
+    for (const middleware of this.middlewares) {
+      articles = await middleware(articles);
+      if (middleware.label === 'tech-relevance') selection.relevant = articles.length;
+    }
+    selection.ranked = articles.length;
     if (limit !== undefined) articles = articles.slice(0, positiveInteger(limit, 'articleLimit'));
-    return { articles, sourceHealth: fetched.sourceHealth };
+    return { articles, sourceHealth: fetched.sourceHealth, selection };
   }
 
   async _prepareDripDeliveries(machine, articles, publishingDay) {
@@ -858,18 +966,32 @@ export class NewsEngine {
         this._fetchWithRetry(source, { limit: maxArticlesPerSource, since }, maxRetries)
       )));
       for (const result of results) {
-        diagnostics.push(result.diagnostic);
+        const accepted = [];
+        const pending = new Map();
+        let collision = false;
         for (const article of result.articles) {
           const snapshot = projectArticle(article);
           const identity = `${result.diagnostic.sourceId}:${snapshot.id}`;
           const serialized = JSON.stringify(snapshot);
-          if (identities.has(identity)) {
-            if (identities.get(identity) !== serialized) throw new Error(`Source identity collision for ${result.diagnostic.sourceId}`);
+          const known = pending.get(identity) ?? identities.get(identity);
+          if (known !== undefined) {
+            if (known !== serialized) {
+              collision = true;
+              break;
+            }
             continue;
           }
-          identities.set(identity, serialized);
-          articles.push(article);
+          pending.set(identity, serialized);
+          accepted.push(article);
         }
+        // Two different articles under one id are ambiguous; drop that source for this pass only.
+        if (collision) {
+          diagnostics.push(identityCollisionDiagnostic(result.diagnostic));
+          continue;
+        }
+        diagnostics.push(result.diagnostic);
+        for (const [identity, serialized] of pending) identities.set(identity, serialized);
+        articles.push(...accepted);
       }
       if (index + concurrency < this.sources.length) await sleep(50);
     }
@@ -1118,6 +1240,32 @@ function emptySourceResult({ publishingDay, sourceHealth, dryRun }) {
   };
 }
 
+/** Attach the run's article selection counts to its stats when this run prepared articles. */
+function withSelection(result, selection) {
+  if (!selection) return result;
+  return { ...result, stats: { ...result.stats, selection } };
+}
+
+/** Calendar arithmetic on the publishing-day string stays correct across DST changes. */
+function previousPublishingDay(publishingDay) {
+  return new Date(Date.parse(`${publishingDay}T00:00:00.000Z`) - DAY_MS).toISOString().slice(0, 10);
+}
+
+function coveredArticles(deliveries) {
+  return deliveries.flatMap(delivery => (Array.isArray(delivery.articleSnapshot) ? delivery.articleSnapshot : []));
+}
+
+function identityCollisionDiagnostic(diagnostic) {
+  return {
+    sourceId: diagnostic.sourceId,
+    sourceName: diagnostic.sourceName,
+    status: 'failed',
+    articleCount: 0,
+    failureType: 'identity_collision',
+    sanitizedError: 'Source returned different articles with the same id',
+  };
+}
+
 function pausedRunResult({ publishingDay, mode }) {
   return {
     status: 'skipped',
@@ -1233,6 +1381,14 @@ function positiveInteger(value, label) {
 function nonNegativeInteger(value, label) {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < 0) throw new Error(`${label} must be a non-negative integer`);
+  return number;
+}
+
+function integerInRange(value, label, minimum, maximum) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < minimum || number > maximum) {
+    throw new Error(`${label} must be an integer in range ${minimum}-${maximum}`);
+  }
   return number;
 }
 

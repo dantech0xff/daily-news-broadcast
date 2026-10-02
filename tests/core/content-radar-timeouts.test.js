@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { AIPlugin, OutputPlugin, SourcePlugin } from '../../src/core/contracts.js';
-import { NewsEngine } from '../../src/core/engine.js';
+import { ContentRadar } from '../../src/core/engine.js';
 import { MemoryDeliveryStore } from '../../src/core/delivery-store.js';
 import { RecordingAI, RecordingOutput, RecordingSource } from '../helpers/fakes.js';
 
@@ -29,7 +29,7 @@ test('never-resolving source settles and a later reservation retry remains possi
   }
   const source = new RecoveringSource();
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('digest'))
     .addOutput(output)
@@ -67,7 +67,7 @@ test('never-resolving AI attempt times out durably and retries without publishin
   }
   const ai = new RecoveringAI();
   const output = new RecordingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(ai)
     .addOutput(output)
@@ -105,7 +105,7 @@ test('never-resolving output is aborted before its lease and becomes a manual am
     }
   }
   const output = new HangingOutput();
-  const engine = new NewsEngine()
+  const engine = new ContentRadar()
     .addSource(new RecordingSource([article]))
     .useAI(new RecordingAI('digest'))
     .addOutput(output)

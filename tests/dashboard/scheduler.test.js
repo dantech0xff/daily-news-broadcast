@@ -34,7 +34,12 @@ function setup() {
     idFactory: (() => { let id = 0; return () => `run-${++id}`; })(),
     executeStream: async (stream, options) => {
       calls.push({ stream, options });
-      return { status: 'success', reason: 'sent', outputs: [{ id: 'telegram', success: true }], stats: { articles: 1 } };
+      return {
+        status: 'success',
+        reason: 'sent',
+        outputs: [{ id: 'telegram', success: true }],
+        stats: { articles: 1, selection: { fetched: 2, fresh: 2, relevant: 1, ranked: 1, title: 'private headline' } },
+      };
     },
     logger: { log() {}, error() {} },
   });
@@ -181,6 +186,7 @@ test('run summaries persist but preview leaves delivery store bytes unchanged', 
   assert.equal(persisted[0].status, 'success');
   assert.equal(persisted[0].reason, 'sent');
   assert.deepEqual(persisted[0].output_summary, { total: 1, succeeded: 1, failed: 0 });
+  assert.deepEqual(persisted[0].stats, { articles: 1, selection: { fetched: 2, fresh: 2, relevant: 1, ranked: 1 } });
   assert.equal('content' in persisted[0], false);
 
   const before = structuredClone(await runtime.store.list('dashboard_runs'));

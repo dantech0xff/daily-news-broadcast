@@ -253,3 +253,12 @@ test('dashboard error logs and API projections redact provider secrets without e
   }
   assert.match(projected, /generic failure/i);
 });
+
+test('run projection keeps only bounded article selection counts', () => {
+  const projected = projectRun({
+    id: 'run', stream_id: 'news', status: 'success', trigger_type: 'manual',
+    stats: { articles: 1, selection: { fetched: 3, fresh: 3, relevant: 1, ranked: 1, enqueued: -1, title: 'private headline' } },
+  });
+
+  assert.deepEqual(projected.stats.selection, { fetched: 3, fresh: 3, relevant: 1, ranked: 1 });
+});

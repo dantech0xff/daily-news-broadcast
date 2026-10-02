@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
+import { OutputPlugin } from '../../src/core/contracts.js';
 import { buildOutputTopology, opaqueId } from '../../src/core/delivery.js';
 
 const ARTICLE = Object.freeze({
@@ -697,6 +698,34 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
     });
   });
 
+  it('reads recent deliveries for story coverage through the SQLite store', async () => {
+    const channelId = 'recent-coverage-channel';
+    const stub = coordinator(channelId);
+
+    await runInDurableObject(stub, async instance => {
+      await instance._ensureIdentity(channelId);
+      const machine = instance._machine(channelId);
+      for (const [requestId, publishingDay] of [
+        ['coverage-today', '2026-07-20'],
+        ['coverage-yesterday', '2026-07-19'],
+        ['coverage-older', '2026-07-18'],
+      ]) {
+        await machine.prepareDelivery({
+          requestId,
+          mode: 'drip',
+          publishingDay,
+          articles: [{ ...ARTICLE, id: `${ARTICLE.id}-${requestId}` }],
+          outputs: [OUTPUT],
+        });
+      }
+
+      const deliveries = await machine.listDeliveriesForPublishingDays(['2026-07-20', '2026-07-19']);
+
+      expect(deliveries.map(delivery => delivery.requestId).sort()).toEqual(['coverage-today', 'coverage-yesterday']);
+      expect(deliveries.every(delivery => delivery.articleSnapshot?.[0]?.title === ARTICLE.title)).toBe(true);
+    });
+  });
+
   it('replays the same manual request despite a fresh server receipt timestamp', async () => {
     const channelId = 'manual-request-replay-channel';
     const stub = coordinator(channelId);
@@ -936,6 +965,83 @@ describe('ChannelDeliveryCoordinator concurrency and recovery', () => {
         outcome: 'skipped',
         reason: 'offline-force-fixture',
       });
+    });
+  });
+
+  it('builds production channel engines with the tech relevance gate before scoring', async () => {
+    const channelId = 'middleware-order-channel';
+    class FixtureOutput extends OutputPlugin {
+      get id() { return 'fixture-output'; }
+      get name() { return 'Fixture Output'; }
+      get deliveryKey() { return 'fixture-output:offline-destination'; }
+    }
+
+    await runInDurableObject(coordinator(channelId), async instance => {
+      const engine = instance._buildEngine({
+        id: channelId,
+        sources: [],
+        output: new FixtureOutput(),
+        prompt: {},
+        maxArticles: 12,
+      });
+
+      expect(engine.middlewares.map(middleware => JSON.parse(middleware.selectionKey)[0]))
+        .toEqual(['tech-relevance', 'scoring', 'semantic-dedup']);
+    });
+  });
+
+  it('forwards the channel daily limit and keeps bounded selection counts in request results', async () => {
+    const channelId = 'selection-counts-channel';
+    const requestId = 'selection-counts-request';
+    const stub = coordinator(channelId);
+
+    await runInDurableObject(stub, async instance => {
+      await instance._ensureIdentity(channelId);
+      const machine = instance._machine(channelId);
+      const channel = await machine.getChannelState();
+      if (channel.paused) {
+        await machine.setPaused(false, {
+          expectedVersion: channel.version,
+          idempotencyKey: 'resume-before-selection-counts',
+          operatorId: 'fixture-operator',
+          reason: 'exercise request result projection',
+        });
+      }
+
+      const originalRunRequest = instance.runRequest.bind(instance);
+      instance.runRequest = async () => null;
+      await instance.acceptRequest({
+        requestId,
+        channelId,
+        triggerType: 'manual',
+        force: false,
+        requestedAt: '2026-07-20T00:00:00.000Z',
+      });
+      let receivedOptions;
+      instance._findChannel = () => ({ id: channelId, output: OUTPUT, mode: 'drip', dailyLimit: 7 });
+      instance._buildEngine = () => ({
+        async runDrip(options) {
+          receivedOptions = options;
+          return {
+            status: 'skipped',
+            reason: 'no_articles',
+            scanError: 'selection exploded near https://private.example/feed',
+            stats: {
+              articles: 0,
+              outputs: 0,
+              selection: { fetched: 5, fresh: 4, relevant: 2, ranked: 2, enqueued: -1, title: 'private headline' },
+            },
+          };
+        },
+      });
+      instance.runRequest = originalRunRequest;
+
+      await instance.runRequest(requestId);
+
+      const request = await instance.getRequest({ channelId, requestId });
+      expect(receivedOptions.dailyLimit).toBe(7);
+      expect(request.result.selection).toEqual({ fetched: 5, fresh: 4, relevant: 2, ranked: 2 });
+      expect(request.result.scanError).toBe('selection exploded near [redacted-url]');
     });
   });
 

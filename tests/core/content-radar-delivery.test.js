@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { NewsEngine } from '../../src/core/engine.js';
+import { ContentRadar } from '../../src/core/engine.js';
 import { MemoryCache } from '../../src/core/caches.js';
 import { opaqueId } from '../../src/core/delivery.js';
 import { MemoryDeliveryStore } from '../../src/core/delivery-store.js';
@@ -19,7 +19,7 @@ const article = {
 function engine({ outputs = [new RecordingOutput()], store = new MemoryDeliveryStore({ durable: true }), cache = new MemoryCache() } = {}) {
   const source = new RecordingSource([article]);
   const ai = new RecordingAI('generated digest');
-  const instance = new NewsEngine()
+  const instance = new ContentRadar()
     .addSource(source)
     .useAI(ai)
     .useCache(cache)
@@ -32,12 +32,12 @@ function engine({ outputs = [new RecordingOutput()], store = new MemoryDeliveryS
 test('non-dry delivery preflight blocks zero outputs and missing durable store before AI', async () => {
   const source = new RecordingSource([article]);
   const ai = new RecordingAI();
-  const noOutputs = new NewsEngine().addSource(source).useAI(ai).useDeliveryStore(new MemoryDeliveryStore({ durable: true }));
+  const noOutputs = new ContentRadar().addSource(source).useAI(ai).useDeliveryStore(new MemoryDeliveryStore({ durable: true }));
   await assert.rejects(noOutputs.run(), /at least one output/i);
   assert.equal(ai.calls.length, 0);
 
   const output = new RecordingOutput();
-  const noStore = new NewsEngine().addSource(source).useAI(ai).addOutput(output);
+  const noStore = new ContentRadar().addSource(source).useAI(ai).addOutput(output);
   await assert.rejects(noStore.run(), /DeliveryStore|durable/i);
   assert.equal(ai.calls.length, 0);
   assert.equal(output.calls.length, 0);
@@ -171,7 +171,7 @@ test('duplicate source identities are collapsed before generation', async () => 
   ]);
   const ai = new RecordingAI();
   const output = new RecordingOutput();
-  const result = await new NewsEngine()
+  const result = await new ContentRadar()
     .addSource(source)
     .useAI(ai)
     .addOutput(output)
@@ -243,7 +243,7 @@ test('same-day concurrent normal digests share one durable reservation and one p
     title: 'Competing digest snapshot',
     url: 'https://example.com/competing',
   }]);
-  const makeEngine = (source, output) => new NewsEngine()
+  const makeEngine = (source, output) => new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI('digest'))
     .addOutput(output)
@@ -303,6 +303,12 @@ test('migrated legacy seen hash remains a direct dual-read dedup guard', async (
     importedAt: '2026-07-20T00:00:00.000Z',
   }, { expectedVersion: 0 }));
   const { instance, ai, outputs } = engine({ store });
+  instance.configure({
+    channelId: 'telegram-main',
+    timezone: 'UTC',
+    maxRetries: 0,
+    clock: () => new Date('2026-07-20T08:00:00.000Z'),
+  });
 
   const result = await instance.run({ requestId: 'normal-with-imported-seen' });
 

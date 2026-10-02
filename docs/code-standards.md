@@ -12,7 +12,7 @@
 | Element | Convention | Example |
 |---|---|---|
 | Files | `kebab-case` | `openai-compat.js` |
-| Classes | PascalCase | `NewsEngine`, `TelegramOutput` |
+| Classes | PascalCase | `ContentRadar`, `TelegramOutput` |
 | Factories | `camelCase` | `groq()`, `buildPrompt()` |
 | Private fields | `_` prefix | `this._config` |
 | Internal helper files | `_` prefix | `_prompts.js` |

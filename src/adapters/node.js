@@ -14,6 +14,7 @@ import {
   buildOutputTopology,
   normalizeSendResult,
   opaqueId,
+  projectSelectionStats,
 } from '../core/index.js';
 import {
   buildEngine as defaultBuildEngine,
@@ -434,6 +435,8 @@ function projectRuntimeStats(stats) {
   }
   if (typeof stats.mode === 'string') projected.mode = boundedText(stats.mode, 20);
   if (typeof stats.ai === 'string') projected.ai = boundedText(stats.ai, 100);
+  const selection = projectSelectionStats(stats.selection);
+  if (selection) projected.selection = selection;
   return projected;
 }
 
@@ -598,9 +601,9 @@ export async function executeRecoveryControl(channel, action, {
           singleMutation: targetDelivery.singleMutation === true,
           signal,
         },
-      ), timeoutMs, 'Output retry'));
+      ), timeoutMs, 'Output retry'), { now: new Date(clock()).getTime() });
     } catch (error) {
-      normalized = normalizeSendResult(null, { error });
+      normalized = normalizeSendResult(null, { error, now: new Date(clock()).getTime() });
     }
     const committed = await machine.commitOutput(result.attempt.attemptId, normalized);
     return projectRecoveryResult({ status: committed.delivery.state, delivery: committed.delivery });
@@ -780,7 +783,7 @@ function fail(logger, message) {
 
 function helpText() {
   return `
-🔥 NewsEngine — Node.js Adapter
+📡 Content Radar — Node.js Adapter
 
   node src/adapters/node.js <command> [options]
 

@@ -77,6 +77,28 @@ test('manual run executes outside schedule and owns one persistent store', async
   assert.equal(runtime.cache.disconnected, true);
 });
 
+test('force audit records keep only bounded article selection counts', async () => {
+  const runtime = fakeRuntime({
+    runChannels: async selected => selected.map(ch => ({
+      channelId: ch.id,
+      status: 'success',
+      stats: {
+        articles: 1,
+        selection: { fetched: 4, fresh: 3, relevant: 2, ranked: 2, enqueued: 1, title: 'private headline' },
+      },
+    })),
+  });
+  const code = await main([
+    'run', '--force', '--channel', 'drip', '--idempotency-key', 'force-selection',
+    '--operator-id', 'operator-key', '--reason', 'approved duplicate-risk delivery',
+    '--confirm-duplicate-risk',
+  ], {}, runtime.deps);
+
+  assert.equal(code, 0);
+  const [audit] = await runtime.store.list('local_force_actions');
+  assert.deepEqual(audit.result[0].stats.selection, { fetched: 4, fresh: 3, relevant: 2, ranked: 2, enqueued: 1 });
+});
+
 test('force requires actor/reason/acknowledgement and persists only opaque exact-replay identifiers', async () => {
   for (const argv of [
     ['run', '--force'],

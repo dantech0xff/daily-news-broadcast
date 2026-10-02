@@ -330,7 +330,7 @@ async function withResponseTimeout(url, timeoutMs, externalSignal, consume) {
   try {
     const response = await fetch(url, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'NewsEngine/2.0' },
+      headers: { 'User-Agent': 'ContentRadar/2.0' },
     });
     return await consume(response);
   } finally {

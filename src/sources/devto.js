@@ -125,7 +125,7 @@ export class JSONAPISource extends SourcePlugin {
 
       const response = await fetch(this._config.url, {
         signal: options.signal,
-        headers: { 'User-Agent': 'NewsEngine/2.0', ...this._config.headers },
+        headers: { 'User-Agent': 'ContentRadar/2.0', ...this._config.headers },
       });
       if (!response.ok) {
         await discardSourceResponse(response);

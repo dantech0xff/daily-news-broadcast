@@ -1,13 +1,14 @@
 /**
- * Stream Runner — Builds NewsEngine from stream config JSON, executes pipeline
+ * Stream Runner — Builds ContentRadar from stream config JSON, executes pipeline
  * Supports $ENV_VAR references in config values (resolved at runtime).
  */
 
 import {
+  ContentRadar,
   DeliveryStateMachine,
-  NewsEngine,
   PrefixedCache,
   buildOutputTopology,
+  createTechRelevanceMiddleware,
   normalizeSendResult,
   opaqueId,
 } from '../core/index.js';
@@ -55,6 +56,7 @@ const STREAM_INTEGER_OPTIONS = Object.freeze({
   concurrency: [1, 50],
   batchSize: [1, 100],
   delayMs: [0, 3_600_000],
+  dailyLimit: [1, 500],
   maxArticles: [1, 500],
   maxArticlesPerSource: [1, 100],
 });
@@ -165,7 +167,7 @@ function createOutput(config) {
 // ============================================
 
 export function buildEngine(streamConfig, dependencies = {}) {
-  const { cache, deliveryStore, clock, env = process.env, engineFactory = () => new NewsEngine() } = dependencies;
+  const { cache, deliveryStore, clock, env = process.env, engineFactory = () => new ContentRadar() } = dependencies;
   if (!cache) throw new Error('Dashboard buildEngine requires a shared cache');
   if (!deliveryStore) throw new Error('Dashboard buildEngine requires a shared delivery store');
   const resolvedStream = validateStreamConfig(streamConfig, env);
@@ -191,6 +193,7 @@ export function buildEngine(streamConfig, dependencies = {}) {
 
   engine.useCache(new PrefixedCache(cache, `news:${resolvedStream.id}`));
   engine.useDeliveryStore(deliveryStore);
+  engine.use(createTechRelevanceMiddleware());
 
   const opts = resolvedStream.options || {};
   engine.configure({
@@ -242,6 +245,7 @@ export async function executeStream(streamConfig, options = {}, dependencies = {
         ...runOptions,
         ...(resolvedStream.options.batchSize !== undefined && { batchSize: resolvedStream.options.batchSize }),
         ...(resolvedStream.options.delayMs !== undefined && { delayMs: resolvedStream.options.delayMs }),
+        ...(resolvedStream.options.dailyLimit !== undefined && { dailyLimit: resolvedStream.options.dailyLimit }),
       })
       : await engine.run(runOptions);
     return { ...result, logs };
@@ -400,9 +404,9 @@ export async function executeStreamControl(streamConfig, action, dependencies = 
           singleMutation: targetDelivery.singleMutation === true,
           signal,
         },
-      ), timeoutMs, 'Output retry'));
+      ), timeoutMs, 'Output retry'), { now: new Date(clock()).getTime() });
     } catch (error) {
-      normalized = normalizeSendResult(null, { error });
+      normalized = normalizeSendResult(null, { error, now: new Date(clock()).getTime() });
     }
     const committed = await machine.commitOutput(result.attempt.attemptId, normalized);
     return projectControlResult({ status: committed.delivery.state, delivery: committed.delivery });

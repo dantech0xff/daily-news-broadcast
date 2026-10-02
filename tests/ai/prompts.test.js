@@ -20,7 +20,23 @@ test('Telegram hook prompt requires a short title, summary, and source link', ()
   assert.match(prompt.system, /không quá 700 ký tự/);
   assert.match(prompt.system, /Link gốc ở cuối/);
   assert.doesNotMatch(prompt.system, /3-5 câu/);
-  assert.doesNotMatch(prompt.system, /Dan Tech Daily News/);
+  assert.doesNotMatch(prompt.system, /Dan Tech Content Radar/);
+});
+
+test('X, Threads, and Facebook hook prompts sign posts with the Content Radar brand', () => {
+  for (const platform of ['x', 'threads', 'facebook']) {
+    const prompt = buildHookPrompt(article, { platform, style: 'digest' });
+
+    assert.match(prompt.system, /End with "— Dan Tech Content Radar"/, platform);
+    assert.doesNotMatch(prompt.system, /Daily News/, platform);
+  }
+});
+
+test('digest prompt opens with the Content Radar header', () => {
+  const prompt = buildPromptForDelivery([article], { deliveryMode: 'digest', platform: 'telegram' });
+
+  assert.match(prompt.system, /📡 Dan Tech Content Radar - \[DD\/MM\/YYYY\]/);
+  assert.doesNotMatch(prompt.system, /Daily Tech Digest/);
 });
 
 test('Telegram hot-take style still resolves to the concise news-summary contract', () => {

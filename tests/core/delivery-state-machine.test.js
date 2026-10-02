@@ -452,19 +452,232 @@ test('day batch refill claim is transactional and stale commits fail closed', as
     batchId: 'batch-refill-lease',
     claimToken: 'stale-token',
     sourceTopologyFingerprint: 'source-topology-one',
-    sourceHealth: { exhaustionEligible: true },
+    sourceHealth: { healthy: 1, exhaustionEligible: true },
     deliveries: [],
+    scanIntervalMs: 900_000,
   }), /no longer owned/i);
   const committed = await machine.recordBatchRefill({
     batchId: 'batch-refill-lease',
     claimToken: winner.claimToken,
     sourceTopologyFingerprint: 'source-topology-one',
-    sourceHealth: { exhaustionEligible: true },
+    sourceHealth: { healthy: 1, exhaustionEligible: true },
     deliveries: [],
+    scanIntervalMs: 900_000,
   });
   assert.equal(committed.refillCount, 1);
-  assert.equal(committed.exhausted, true);
+  assert.equal(committed.exhausted, false);
   assert.equal(committed.activeRefillClaimToken, null);
+  assert.equal(committed.nextRefillAt, '2026-07-20T00:15:00.000Z');
+});
+
+async function radarBatch(machine, { batchId = 'radar-batch', publishingDay = '2026-07-20' } = {}) {
+  await machine.ensureDayBatch({
+    batchId,
+    publishingDay,
+    mode: 'drip',
+    sourceTopologyFingerprint: 'radar-topology',
+    sourceHealth: null,
+    deliveries: [],
+  });
+  return { batchId, sourceTopologyFingerprint: 'radar-topology' };
+}
+
+test('radar scans claim again only after each scan interval elapses', async () => {
+  const { machine, setNow } = await prepared();
+  const target = await radarBatch(machine);
+  const first = await machine.claimBatchRefill(target);
+  await machine.recordBatchRefill({
+    ...target, claimToken: first.claimToken, sourceHealth: { healthy: 1 }, deliveries: [], scanIntervalMs: 900_000,
+  });
+
+  setNow('2026-07-20T00:10:00.000Z');
+  const early = await machine.claimBatchRefill(target);
+  assert.equal(early.status, 'blocked');
+  assert.equal(early.reason, 'refill_not_due');
+
+  setNow('2026-07-20T00:15:00.000Z');
+  const second = await machine.claimBatchRefill(target);
+  assert.equal(second.status, 'claimed');
+  const recorded = await machine.recordBatchRefill({
+    ...target, claimToken: second.claimToken, sourceHealth: { healthy: 2 }, deliveries: [], scanIntervalMs: 900_000,
+  });
+  assert.equal(recorded.refillCount, 2);
+  assert.equal(recorded.exhausted, false);
+  assert.equal(recorded.nextRefillAt, '2026-07-20T00:30:00.000Z');
+});
+
+test('failed radar scans back off exponentially and a healthy scan resets the streak', async () => {
+  const { machine, setNow } = await prepared();
+  const target = await radarBatch(machine);
+  const scan = async (sourceHealth) => {
+    const claim = await machine.claimBatchRefill(target);
+    assert.equal(claim.status, 'claimed');
+    return machine.recordBatchRefill({
+      ...target, claimToken: claim.claimToken, sourceHealth, deliveries: [], scanIntervalMs: 900_000,
+    });
+  };
+
+  const failed = await scan({ healthy: 0, failed: 2 });
+  assert.equal(failed.refillFailureCount, 1);
+  assert.equal(failed.refillCount, 0);
+  assert.equal(failed.nextRefillAt, '2026-07-20T00:01:00.000Z');
+  assert.equal((await machine.claimBatchRefill(target)).reason, 'refill_backoff');
+
+  setNow('2026-07-20T00:01:00.000Z');
+  const failedAgain = await scan({ healthy: 0, unknown: 1 });
+  assert.equal(failedAgain.refillFailureCount, 2);
+  assert.equal(failedAgain.nextRefillAt, '2026-07-20T00:03:00.000Z');
+
+  setNow('2026-07-20T00:03:00.000Z');
+  const recovered = await scan({ healthy: 1, failed: 1, degraded: true });
+  assert.equal(recovered.refillFailureCount, 0);
+  assert.equal(recovered.refillCount, 1);
+  assert.equal(recovered.nextRefillAt, '2026-07-20T00:18:00.000Z');
+});
+
+test('legacy exhausted or already refilled day batches do not block radar scans', async () => {
+  const { store, machine } = await prepared();
+  await store.transact(tx => tx.put('day_batches', 'legacy-batch', {
+    batchId: 'legacy-batch',
+    channelId: 'telegram-main',
+    publishingDay: '2026-07-20',
+    mode: 'drip',
+    sourceTopologyFingerprint: 'radar-topology',
+    sourceHealth: { exhaustionEligible: true },
+    refillCount: 1,
+    refillFailureCount: 3,
+    activeRefillClaimToken: null,
+    refillDeadlineAt: null,
+    nextRefillAt: null,
+    exhausted: true,
+    createdAt: '2026-07-19T23:00:00.000Z',
+    updatedAt: '2026-07-19T23:00:00.000Z',
+  }, { expectedVersion: 0 }));
+
+  const claim = await machine.claimBatchRefill({ batchId: 'legacy-batch', sourceTopologyFingerprint: 'radar-topology' });
+  assert.equal(claim.status, 'claimed');
+});
+
+test('scan claims renew only while their token still owns the batch', async () => {
+  const { machine, setNow } = await prepared();
+  const target = await radarBatch(machine);
+  const first = await machine.claimBatchRefill({ ...target, leaseMs: 5_000 });
+  assert.equal(first.batch.refillDeadlineAt, '2026-07-20T00:00:05.000Z');
+
+  setNow('2026-07-20T00:00:06.000Z');
+  const renewed = await machine.renewBatchRefillClaim({ batchId: target.batchId, claimToken: first.claimToken, leaseMs: 5_000 });
+  assert.equal(renewed.status, 'renewed');
+  assert.equal(renewed.batch.refillDeadlineAt, '2026-07-20T00:00:11.000Z');
+
+  setNow('2026-07-20T00:00:12.000Z');
+  const takeover = await machine.claimBatchRefill({ ...target, leaseMs: 5_000 });
+  assert.equal(takeover.status, 'claimed');
+  assert.equal((await machine.renewBatchRefillClaim({ batchId: target.batchId, claimToken: first.claimToken })).status, 'lost');
+});
+
+test('orphan adoption links scan deliveries but recovers only an expired claim', async () => {
+  const { machine, outputs, setNow } = await prepared();
+  const live = await radarBatch(machine, { batchId: 'live-claim-batch' });
+  const liveClaim = await machine.claimBatchRefill({ ...live, leaseMs: 60_000 });
+  const inFlight = await machine.prepareDelivery({
+    requestId: 'in-flight-scan-item',
+    mode: 'drip',
+    publishingDay: '2026-07-20',
+    articles: [{ ...article, id: 'in-flight', url: 'https://example.com/in-flight' }],
+    outputs,
+  });
+
+  const adoptedLive = await machine.adoptOrphanedDripDeliveries({ ...live, publishingDay: '2026-07-20' });
+  assert.equal(adoptedLive.adoptedCount, 1);
+  assert.equal(adoptedLive.batch.activeRefillClaimToken, liveClaim.claimToken);
+  assert.deepEqual((await machine.listBatchItems(live.batchId)).map(item => item.deliveryId), [inFlight.deliveryId]);
+
+  setNow('2026-07-20T00:01:00.000Z');
+  const crashed = await radarBatch(machine, { batchId: 'crashed-claim-batch', publishingDay: '2026-07-21' });
+  await machine.claimBatchRefill({ ...crashed, leaseMs: 1_000 });
+  await machine.prepareDelivery({
+    requestId: 'crashed-scan-item',
+    mode: 'drip',
+    publishingDay: '2026-07-21',
+    articles: [{ ...article, id: 'crashed', url: 'https://example.com/crashed' }],
+    outputs,
+  });
+  setNow('2026-07-20T00:01:05.000Z');
+  const recovered = await machine.adoptOrphanedDripDeliveries({ ...crashed, publishingDay: '2026-07-21' });
+  assert.equal(recovered.adoptedCount, 1);
+  assert.equal(recovered.batch.activeRefillClaimToken, null);
+});
+
+test('a scan that enqueued articles counts as successful even without a healthy source', async () => {
+  const { machine, outputs } = await prepared();
+  const target = await radarBatch(machine);
+  const claim = await machine.claimBatchRefill(target);
+  const delivery = await machine.prepareDelivery({
+    requestId: 'unknown-source-item',
+    mode: 'drip',
+    publishingDay: '2026-07-20',
+    articles: [{ ...article, id: 'unknown-source', url: 'https://example.com/unknown-source' }],
+    outputs,
+  });
+
+  const recorded = await machine.recordBatchRefill({
+    ...target,
+    claimToken: claim.claimToken,
+    sourceHealth: { healthy: 0, unknown: 1 },
+    deliveries: [delivery],
+    scanIntervalMs: 900_000,
+  });
+
+  assert.equal(recorded.refillFailureCount, 0);
+  assert.equal(recorded.refillCount, 1);
+  assert.equal(recorded.nextRefillAt, '2026-07-20T00:15:00.000Z');
+});
+
+test('scan records require an interval and honor an explicit failure', async () => {
+  const { machine } = await prepared();
+  const target = await radarBatch(machine);
+  const claim = await machine.claimBatchRefill(target);
+
+  await assert.rejects(machine.recordBatchRefill({
+    ...target, claimToken: claim.claimToken, sourceHealth: { healthy: 1 }, deliveries: [],
+  }), /scanIntervalMs/);
+  const failed = await machine.recordBatchRefill({
+    ...target,
+    claimToken: claim.claimToken,
+    sourceHealth: { healthy: 3 },
+    deliveries: [],
+    scanIntervalMs: 900_000,
+    failed: true,
+  });
+  assert.equal(failed.refillFailureCount, 1);
+  assert.equal(failed.nextRefillAt, '2026-07-20T00:01:00.000Z');
+});
+
+test('recent delivery lookup includes forced drips and stays channel-local', async () => {
+  const { store, machine, outputs } = await prepared();
+  const other = new DeliveryStateMachine({
+    store,
+    channelId: 'x-tech-vn',
+    clock: () => new Date('2026-07-20T00:00:00.000Z'),
+  });
+  await machine.prepareDelivery({
+    requestId: 'forced-yesterday',
+    mode: 'drip',
+    publishingDay: '2026-07-19',
+    articles: [{ ...article, id: 'forced', url: 'https://example.com/forced' }],
+    outputs,
+    forceKind: 'force',
+  });
+  await other.prepareDelivery({
+    requestId: 'other-channel-item',
+    mode: 'drip',
+    publishingDay: '2026-07-20',
+    articles: [{ ...article, id: 'other', url: 'https://example.com/other' }],
+    outputs: [new RecordingOutput({ key: 'x:one' })],
+  });
+
+  const deliveries = await machine.listDeliveriesForPublishingDays(['2026-07-20', '2026-07-19']);
+  assert.deepEqual(deliveries.map(delivery => delivery.requestId).sort(), ['forced-yesterday', 'request-1']);
 });
 
 test('orphan adoption checks only the deterministic current batch after large retained history', async () => {

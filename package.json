@@ -1,8 +1,8 @@
 {
-  "name": "news-engine",
+  "name": "content-radar",
   "version": "2.0.0",
   "type": "module",
-  "description": "Plugin-based news aggregation engine. Any source, any AI, any output.",
+  "description": "Content Radar — scans technology content, summarizes it with AI, and posts to social channels.",
   "scripts": {
     "start": "node src/adapters/node.js run",
     "start:cron": "node src/adapters/node.js cron",

@@ -13,6 +13,15 @@ const stream = {
 
 const SHORT_ATTEMPT_TIMEOUT_MS = 40;
 
+test('dashboard stream engines apply the tech relevance gate', () => {
+  const engine = buildEngine(stream, {
+    cache: new MemoryCache(),
+    deliveryStore: new MemoryDeliveryStore({ durable: true }),
+  });
+
+  assert.deepEqual(engine.middlewares.map(middleware => middleware.label), ['tech-relevance']);
+});
+
 function shortLeaseMachine(options) {
   return new DeliveryStateMachine({ ...options, attemptTimeoutMs: SHORT_ATTEMPT_TIMEOUT_MS });
 }
@@ -49,6 +58,23 @@ test('executeStream preserves drip mode and explicit trigger semantics', async (
   assert.match(calls[2].requestId, /^[a-f0-9]{64}$/);
   assert.notEqual(calls[2].idempotencyKey, 'force-1');
   assert.equal(calls[2].operatorForce, undefined);
+});
+
+test('drip streams forward their configured daily limit to the engine', async () => {
+  const calls = [];
+  const engine = {
+    setLogger() {},
+    async runDrip(options) { calls.push(options); return { status: 'success', outputs: [] }; },
+    async run() { throw new Error('digest path must not run'); },
+  };
+
+  await executeStream({ ...stream, options: { batchSize: 1, dailyLimit: 4 } }, { triggerType: 'manual' }, {
+    buildEngine: () => engine,
+  });
+  await executeStream(stream, { triggerType: 'manual' }, { buildEngine: () => engine });
+
+  assert.equal(calls[0].dailyLimit, 4);
+  assert.equal('dailyLimit' in calls[1], false);
 });
 
 test('preview is mode-aware and read-only at the engine boundary', async () => {
@@ -88,7 +114,7 @@ test('buildEngine rejects unsafe numeric stream options before engine constructi
   for (const options of [
     { concurrency: -1 }, { concurrency: 0 }, { concurrency: 1.5 },
     { maxArticlesPerSource: 0 }, { maxArticles: Number.MAX_SAFE_INTEGER },
-    { batchSize: -1 }, { delayMs: -1 },
+    { batchSize: -1 }, { delayMs: -1 }, { dailyLimit: 0 }, { dailyLimit: 501 },
   ]) {
     let constructed = 0;
     assert.throws(() => buildEngine({ ...stream, options }, {

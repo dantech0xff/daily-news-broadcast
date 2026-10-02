@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { NewsEngine } from '../../src/core/engine.js';
+import { ContentRadar } from '../../src/core/engine.js';
 import { MemoryDeliveryStore } from '../../src/core/delivery-store.js';
 import { RecordingAI, RecordingOutput, RecordingSource } from '../helpers/fakes.js';
 
@@ -9,7 +9,7 @@ test('all failed sources return failed/sources_failed without AI or output mutat
   const source = new RecordingSource([], { status: 'failed', articleCount: 0, failureType: 'http', httpStatus: 503 });
   const ai = new RecordingAI();
   const output = new RecordingOutput();
-  const result = await new NewsEngine()
+  const result = await new ContentRadar()
     .addSource(source)
     .useAI(ai)
     .addOutput(output)
@@ -24,7 +24,7 @@ test('all failed sources return failed/sources_failed without AI or output mutat
 
 test('proven healthy empty sources return a truthful exhausted skip', async () => {
   const source = new RecordingSource([], { status: 'empty', articleCount: 0 });
-  const result = await new NewsEngine()
+  const result = await new ContentRadar()
     .addSource(source)
     .useAI(new RecordingAI())
     .addOutput(new RecordingOutput())
@@ -42,7 +42,7 @@ test('mixed degradation may deliver healthy articles but remains visible', async
   }], { status: 'success', articleCount: 1 });
   const failed = new RecordingSource([], { status: 'failed', articleCount: 0, failureType: 'transport' });
   Object.defineProperty(failed, 'id', { get: () => 'failed-source' });
-  const result = await new NewsEngine()
+  const result = await new ContentRadar()
     .addSource(healthy)
     .addSource(failed)
     .useAI(new RecordingAI())

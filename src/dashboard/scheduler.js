@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import cronModule from 'node-cron';
 
+import { projectSelectionStats } from '../core/delivery.js';
 import { assertDeliveryStore } from '../core/delivery-store.js';
 import {
   deriveLocalForceIdentifiers,
@@ -548,6 +549,8 @@ function projectStats(stats) {
   }
   if (typeof stats.mode === 'string') projected.mode = bounded(stats.mode, 20);
   if (typeof stats.ai === 'string') projected.ai = bounded(stats.ai, 100);
+  const selection = projectSelectionStats(stats.selection);
+  if (selection) projected.selection = selection;
   return projected;
 }
 

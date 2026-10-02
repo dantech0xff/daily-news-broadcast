@@ -2,6 +2,7 @@ import express from 'express';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { projectSelectionStats } from '../core/delivery.js';
 import { sanitizeRuntimeError } from '../channels/runner.js';
 import {
   noStore,
@@ -42,7 +43,7 @@ export function createDashboardApp({
   });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ service: 'newsengine-dashboard', status: 'ok', time: new Date().toISOString(), version, channelCount: scheduler.listStreams().length });
+    res.json({ service: 'content-radar-dashboard', status: 'ok', time: new Date().toISOString(), version, channelCount: scheduler.listStreams().length });
   });
 
   app.get('/api/events', trigger, (req, res) => {
@@ -327,6 +328,8 @@ function projectStats(stats) {
   }
   if (typeof stats.mode === 'string') projected.mode = safeText(stats.mode, 20);
   if (typeof stats.ai === 'string') projected.ai = safeText(stats.ai, 100);
+  const selection = projectSelectionStats(stats.selection);
+  if (selection) projected.selection = selection;
   return projected;
 }
 

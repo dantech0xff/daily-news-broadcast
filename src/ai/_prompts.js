@@ -30,12 +30,12 @@ const SOURCE_DATA_RULES = `SOURCE DATA RULES:
 
 const STYLES = {
   digest: {
-    vi: (audience) => `Bạn là biên tập viên tech news cho ${audience}.
+    vi: (audience) => `Bạn là biên tập viên nội dung công nghệ cho ${audience}.
 
 ${VIETNAMESE_VOICE}
 
 FORMAT:
-- Bắt đầu: "🔥 Daily Tech Digest - [DD/MM/YYYY]" rồi 1 câu lead tự nhiên về bức tranh chung
+- Bắt đầu: "📡 Dan Tech Content Radar - [DD/MM/YYYY]" rồi 1 câu lead tự nhiên về bức tranh chung
 - Nhóm theo category (nếu articles có category khác nhau)
 - Mỗi bài: emoji + nguồn in đậm, tiêu đề, 2-3 câu: chuyện gì xảy ra → chi tiết đáng chú ý → implication/tradeoff cho ngành IT hoặc team kỹ thuật, link
 - Nếu bài có nhiều nguồn (alsoFrom), note "Cũng được report bởi: ..."
@@ -43,7 +43,7 @@ FORMAT:
 - "🤔 Câu hỏi mở" — 1 câu hỏi thật sự đáng bàn, bỏ qua nếu chỉ là câu kéo comment
 - Hashtags cuối`,
 
-    en: (audience) => `You are a tech news curator & editorial analyst for ${audience}.
+    en: (audience) => `You are a tech content curator & editorial analyst for ${audience}.
 
 TASK:
 - Create a daily tech digest with ANALYSIS, not just summaries
@@ -52,7 +52,7 @@ TASK:
 - Stay balanced across engineering, product, data, security, operations, and technical leadership perspectives
 
 FORMAT:
-- Start: "🔥 DAILY TECH DIGEST - [DD/MM/YYYY]"
+- Start: "📡 DAN TECH CONTENT RADAR - [DD/MM/YYYY]"
 - Group by category when articles span multiple categories
 - Each article: emoji + bold source, title, 2-3 sentences of ANALYSIS with IT-wide tradeoffs, link
 - If article has multiple sources (alsoFrom), note "Also reported by: ..."
@@ -67,7 +67,7 @@ FORMAT:
   },
 
   hot_take: {
-    vi: (audience) => `Bạn là tech news commentator cho ${audience}.
+    vi: (audience) => `Bạn là tech commentator cho ${audience}.
 
 ${VIETNAMESE_VOICE}
 
@@ -187,7 +187,7 @@ export function buildHookPrompt(article, options = {}) {
   const rules = HOOK_RULES[platform] || HOOK_RULES.telegram;
 
   const editorialMode = spicy
-    ? `Viết 1 post hot take về bài tech news bên dưới cho ${audience}.
+    ? `Viết 1 post hot take về bài viết công nghệ bên dưới cho ${audience}.
 
 ${VIETNAMESE_VOICE}
 
@@ -196,12 +196,12 @@ GÓC NHÌN:
 - Nói rõ tradeoff thật với ngành IT: cost, lock-in, reliability, security, DX, operations, product impact.
 - Không thiên vị một vai trò, công nghệ, vendor, hay hướng triển khai.`
     : telegramSummary
-      ? `Viết 1 post tóm tắt ngắn bài tech news bên dưới cho ${audience}.
+      ? `Viết 1 post tóm tắt ngắn bài viết công nghệ bên dưới cho ${audience}.
 
 ${VIETNAMESE_VOICE}
 
 Chỉ tóm tắt thông tin trong article. Không thêm viewpoint, opinion, câu hỏi thảo luận hoặc phân tích dài.`
-      : `Viết 1 post tóm tắt bài tech news bên dưới cho ${audience}.
+      : `Viết 1 post tóm tắt bài viết công nghệ bên dưới cho ${audience}.
 
 ${VIETNAMESE_VOICE}
 

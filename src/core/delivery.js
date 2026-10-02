@@ -189,6 +189,18 @@ export function sanitizeError(value) {
     .slice(0, MAX_ERROR_LENGTH);
 }
 
+const SELECTION_COUNT_KEYS = ['fetched', 'fresh', 'uncovered', 'relevant', 'ranked', 'enqueued'];
+
+/** Keep only bounded non-negative article selection counts for status and run records. */
+export function projectSelectionStats(selection) {
+  if (!selection || typeof selection !== 'object') return null;
+  const projected = {};
+  for (const key of SELECTION_COUNT_KEYS) {
+    if (Number.isSafeInteger(selection[key]) && selection[key] >= 0) projected[key] = selection[key];
+  }
+  return Object.keys(projected).length > 0 ? projected : null;
+}
+
 function assertSerializableAndBounded(value) {
   let json;
   try { json = JSON.stringify(value); }

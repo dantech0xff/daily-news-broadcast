@@ -2,17 +2,19 @@ import { DurableObject } from 'cloudflare:workers';
 
 import {
   CloudflareKVCache,
+  ContentRadar,
   DeliveryStateMachine,
-  NewsEngine,
   PrefixedCache,
   SQLiteDeliveryStore,
   buildOutputTopology,
   channelArticleHash,
   createScoringMiddleware,
   createSemanticDedupMiddleware,
+  createTechRelevanceMiddleware,
   normalizeSendResult,
   opaqueId,
   projectArticle,
+  projectSelectionStats,
   sanitizeError,
 } from '../core/index.js';
 import { defineChannels } from '../channels/definitions.js';
@@ -200,7 +202,12 @@ export class ChannelDeliveryCoordinator extends DurableObject {
         articleLimit: request.limit ?? undefined,
       };
       result = channel.mode === 'drip'
-        ? await engine.runDrip({ ...options, batchSize: request.singleMutation ? 1 : channel.batchSize || 5, delayMs: channel.delayMs ?? 0 })
+        ? await engine.runDrip({
+          ...options,
+          batchSize: request.singleMutation ? 1 : channel.batchSize || 5,
+          delayMs: channel.delayMs ?? 0,
+          ...(channel.dailyLimit !== undefined && { dailyLimit: channel.dailyLimit }),
+        })
         : await engine.run(options);
     } catch (error) {
       const sanitizedError = sanitizeError(error);
@@ -646,12 +653,13 @@ export class ChannelDeliveryCoordinator extends DurableObject {
   _buildEngine(channel) {
     const rawCache = new CloudflareKVCache(this.env.NEWS_CACHE, { required: true });
     const cache = new PrefixedCache(rawCache, `news:${channel.id}`);
-    const engine = new NewsEngine();
+    const engine = new ContentRadar();
     for (const source of channel.sources) engine.addSource(source);
     if (channel.ai) engine.useAI(channel.ai);
     for (const output of channel.outputs ?? [channel.output]) engine.addOutput(output);
     engine.useCache(cache);
     engine.useDeliveryStore(this.store);
+    engine.use(createTechRelevanceMiddleware());
     engine.use(createScoringMiddleware({ maxArticles: channel.maxArticles || 12 }));
     engine.use(createSemanticDedupMiddleware());
     engine.configure({
@@ -1395,7 +1403,15 @@ function projectRunResult(result) {
       unknown: result.sourceHealth.unknown,
       degraded: result.sourceHealth.degraded,
     } : null,
+    selection: projectSelectionStats(result?.stats?.selection),
+    scanError: projectScanError(result),
   };
+}
+
+/** Radar scan failures stay visible in request status even when queued items still delivered. */
+function projectScanError(result) {
+  const value = result?.scanError ?? (result?.reason === 'scan_failed' ? result?.error : null);
+  return value ? sanitizeError(value).slice(0, 200) : null;
 }
 
 function projectPreview(result) {
