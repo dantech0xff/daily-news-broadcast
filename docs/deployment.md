@@ -6,7 +6,18 @@ Production URL: <https://news-engine.dan-tran.workers.dev>
 
 The Worker is promoted in stages. Production is currently on the post-lifecycle `active` runtime with the Telegram coordinator resumed. The SQLite Durable Object lifecycle, legacy KV import, one-message canary, and explicit per-channel resume are complete. Gemini generation through Cloudflare AI Gateway BYOK and the standard Telegram photo-caption delivery path are verified in production. Token maintenance remains disabled until separately approved.
 
-Current incident state (2026-07-29):
+Current recovery state (2026-08-08):
+
+- Build: `cloudflare-aig-compat-byok-20260729` remains active at 100% traffic
+- Runtime: `active`; `telegram-main` is resumed and `mutationState=free`
+- Incident request: scheduled request `b745b3d6d4383b92f61415f10df5528102fab661e200617a463cbe7a43d5ad18` completed `ambiguous` at `2026-08-05T16:02:21.024Z`
+- Reconciliation evidence: public Telegram message `1549` appeared at `2026-08-05T16:02:24Z`, three seconds after the durable ambiguity was recorded, so retrying the output would have created a duplicate
+- Recovery: output `261704f3b73e1df7147c655b309f134a8565cc875c876a36a7561d9c576f5a30` on delivery `046087cc696675ee56de71789ac2cbf10a7e09e84023120a0d35313d4fe94d8f` was resolved with versioned `confirm-delivered` and message ID `1549`
+- Verification: channel version `432`, zero ambiguous outputs, zero maintenance dead letters, and repair request `3a6117a648ce73b0df465123a4067935fe1fd04f25c3e21d3cfdf0c0ec14ff7b` completed `success`
+- Telegram delivery resumed with public messages `1552` and `1553` at `2026-08-08T02:20:38Z` and `2026-08-08T02:20:39Z`
+- Queue snapshot after recovery: 29 items for `2026-08-05`, 16 remaining, 3 blocked; 33 generation-exhausted recovery targets remain non-ambiguous and were not retried to avoid stale bulk delivery
+
+Previous AI Gateway recovery state (2026-07-29):
 
 - Build: `cloudflare-aig-compat-byok-20260729`
 - Active Worker artifact: `cloudflare-aig-compat-byok-20260729` at 100% traffic
@@ -87,7 +98,7 @@ curl --fail-with-body --silent --show-error \
 npx wrangler deployments status --config wrangler.toml --json
 ```
 
-`/health` must report `status: "ok"`, `runtimeMode: "active"`, and build `cloudflare-aig-compat-byok-20260729`. Protected status currently reports `paused=false`, `mutationState=free`, channel version `197`, zero ambiguous outputs, zero maintenance dead letters, and 22 unresolved generation targets. The verified recovery moved delivery `7cc7878559638127d33d5fc8647b0a0960a237eb6f242335e390d5bedf716fa2` from `generation_exhausted` to `ready`, after which the repair alarm completed one article and one output.
+`/health` must report `status: "ok"`, `runtimeMode: "active"`, and build `cloudflare-aig-compat-byok-20260729`. The 2026-08-08 recovery snapshot reports `paused=false`, `mutationState=free`, channel version `432`, zero ambiguous outputs, zero maintenance dead letters, and 33 unresolved generation targets. The versioned `confirm-delivered` action is backed by public Telegram message `1549`; the following repair alarm completed successfully and produced messages `1552` and `1553`. The earlier AI Gateway recovery moved delivery `7cc7878559638127d33d5fc8647b0a0960a237eb6f242335e390d5bedf716fa2` from `generation_exhausted` to `ready`, after which its repair alarm completed one article and one output.
 
 The approved canary request is `711970696f57497e948441831451f94eea1ea004ba8fcd4ef3a29f1b64c80a59`. Its terminal evidence is `completed/success`, delivery `30a1346a6862c7a2681b90828b52549d6df0875f1329592a8151c7a5a88eb20b`, with `articles=1` and `outputs=1`. Confirmation was read-only; no second canary POST was issued.
 
