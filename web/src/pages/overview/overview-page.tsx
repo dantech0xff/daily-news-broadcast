@@ -10,13 +10,14 @@ import { ExternalLink } from '../../components/external-link';
 import { IconPlus } from '../../components/icons';
 import { PageHeader } from '../../components/page-header';
 import { EmptyState, ErrorState, LoadingState, StaleDataNotice } from '../../components/states';
+import { CutoverNotice } from '../../features/channel-actions/cutover-notice';
 import { PauseResumeButton } from '../../features/channel-actions/pause-resume-button';
 import { PreviewButton } from '../../features/channel-actions/preview-dialog';
 import { RunNowButton } from '../../features/channel-actions/run-now-button';
 import { useSession } from '../../app/session';
 import { formatDateTime, formatNumber, formatRelative } from '../../lib/format';
 import { AI_PROVIDER_LABELS, RUN_REASON_LABELS, RUN_STATUS_LABELS, labelOf } from '../../lib/labels';
-import { channelStateView, isStuckTarget } from '../../lib/operations';
+import { channelStateView, isCutoverPending, isStuckTarget } from '../../lib/operations';
 import { runStatusTone } from '../../lib/status-tones';
 
 const RECENT_POSTS_QUERY: ContentQuery = { status: ['delivered'], dateField: 'delivered', limit: 8 };
@@ -148,6 +149,7 @@ function ChannelRow({ channel, status, statusError }: { channel: ChannelRecord; 
           {channel.id} · AI: {labelOf(AI_PROVIDER_LABELS, channel.ai.provider)}{model} · Lịch <code className="font-mono">{channel.cron}</code> ({channel.timezone})
         </p>
         {statusError ? <p className="mt-1 text-xs text-rose-600">Không đọc được trạng thái kênh.</p> : null}
+        {isCutoverPending(status ?? channel) ? <CutoverNotice channelId={channel.id} compact /> : null}
       </div>
 
       <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm xl:w-96">

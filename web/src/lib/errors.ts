@@ -7,6 +7,14 @@ import { CREDENTIAL_SLOT_LABELS, labelOf } from './labels';
 const UNEXPECTED_ERROR = 'Đã xảy ra lỗi không mong muốn.';
 const MAX_ISSUE_LINES = 5;
 
+/** 409 of resume, manual runs, and output retries while a cutover channel has no `notBefore`. */
+export const CUTOVER_REQUIRED_CODE = 'cutover_required';
+const CUTOVER_REQUIRED_HINT = 'Mở trang cấu hình kênh, đặt mốc ở mục Cutover rồi thử lại.';
+
+export function isCutoverRequiredError(error: unknown): boolean {
+  return error instanceof ApiError && error.code === CUTOVER_REQUIRED_CODE;
+}
+
 export interface ErrorDescription {
   title: string;
   lines: string[];
@@ -26,6 +34,7 @@ export function describeError(error: unknown): ErrorDescription {
   if (typeof details.unresolved === 'number') lines.push(`Còn ${details.unresolved} mục chưa xử lý xong.`);
   if (typeof details.currentVersion === 'number') lines.push(`Phiên bản hiện tại trên máy chủ: ${details.currentVersion}.`);
   if (typeof details.reason === 'string' && details.reason !== '') lines.push(`Chi tiết: ${details.reason}`);
+  if (error.code === CUTOVER_REQUIRED_CODE) lines.push(CUTOVER_REQUIRED_HINT);
   return { title: error.message, lines };
 }
 

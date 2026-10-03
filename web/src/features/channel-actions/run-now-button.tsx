@@ -6,11 +6,14 @@ import type { ChannelStatus } from '../../api/types';
 import { IconPlay } from '../../components/icons';
 import { OperatorButton } from '../../components/operator-button';
 import { useToast } from '../../components/toast';
+import { isCutoverPending } from '../../lib/operations';
+import { CUTOVER_BLOCKS_RUN } from './cutover-notice';
 
 /** Why a manual run cannot start, or `null`. The server re-checks every condition. */
 export function runNowBlocker(enabled: boolean, status: ChannelStatus | undefined): string | null {
   if (!enabled) return 'Kênh đang tắt';
   if (!status) return 'Đang tải trạng thái kênh';
+  if (isCutoverPending(status)) return CUTOVER_BLOCKS_RUN;
   if (status.paused === true) return 'Kênh đang tạm dừng — hãy Resume trước';
   if (status.running || status.queued) return 'Kênh đang chạy hoặc đang chờ chạy';
   return null;

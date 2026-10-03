@@ -11,12 +11,16 @@
  * - `expectedVersion` comes from the caller (channel status `version` for
  *   pause/resume, the target's `expectedVersion` for recovery actions); a
  *   stale version (409 `version_conflict`) asks the operator to reload.
+ * - The server fingerprints the whole request (target, `messageId`, risk
+ *   confirmations) with the key as well, so callers that collect such inputs
+ *   pass `children` as a function and disable them while `locked`.
  * Mount it only while it should be open (`{request && <ControlDialog …/>}`)
  * so every opening starts with a fresh reason and key.
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useId, useState, type ReactNode } from 'react';
+import { Link } from 'react-router';
 
 import { useApi } from '../../api/api-context';
 import { ApiError } from '../../api/client';
@@ -28,8 +32,10 @@ import { Dialog } from '../../components/dialog';
 import { describedBy, Field, Textarea } from '../../components/form-controls';
 import { ErrorState } from '../../components/states';
 import { useToast } from '../../components/toast';
+import { isCutoverRequiredError } from '../../lib/errors';
 import { newIdempotencyKey } from '../../lib/ids';
 import { CONTROL_ACTION_LABELS } from '../../lib/labels';
+import { cutoverSectionPath } from '../../lib/operations';
 
 const DEFAULT_REASON_MAX_LENGTH = 500;
 
@@ -41,20 +47,32 @@ export interface ControlRequest {
   target?: Omit<ControlParams, 'idempotencyKey' | 'expectedVersion' | 'reason'>;
 }
 
+export interface ControlDialogState {
+  /**
+   * A submission failed with an unknown outcome: every input that feeds the
+   * request must stay as it is, so a retry replays the first submission.
+   */
+  locked: boolean;
+  /** A submission is in flight. */
+  pending: boolean;
+}
+
 export interface ControlDialogProps {
   request: ControlRequest;
   title: ReactNode;
   description?: ReactNode;
   confirmLabel?: string;
   tone?: 'primary' | 'danger';
-  /** Extra warnings shown above the reason. */
-  children?: ReactNode;
+  /** Extra warnings and inputs shown above the reason. */
+  children?: ReactNode | ((state: ControlDialogState) => ReactNode);
+  /** Why the action cannot be confirmed yet (e.g. a required confirmation is unchecked); disables the confirm button. */
+  submitBlocker?: string | null;
   successMessage?: (result: ControlResult) => string;
   onClose: () => void;
   onDone?: (result: ControlResult) => void;
 }
 
-export function ControlDialog({ request, title, description, confirmLabel, tone = 'primary', children, successMessage, onClose, onDone }: ControlDialogProps) {
+export function ControlDialog({ request, title, description, confirmLabel, tone = 'primary', children, submitBlocker = null, successMessage, onClose, onDone }: ControlDialogProps) {
   const api = useApi();
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -90,8 +108,9 @@ export function ControlDialog({ request, title, description, confirmLabel, tone 
   const reasonError = trimmed.length > maxLength
     ? `Tối đa ${maxLength} ký tự.`
     : touched && trimmed === '' ? 'Cần nhập lý do.' : null;
-  const canSubmit = trimmed !== '' && trimmed.length <= maxLength && !mutation.isPending;
+  const canSubmit = trimmed !== '' && trimmed.length <= maxLength && !mutation.isPending && !submitBlocker;
   const conflict = mutation.error instanceof ApiError && mutation.error.isVersionConflict;
+  const extra = typeof children === 'function' ? children({ locked: reasonLocked, pending: mutation.isPending }) : children;
 
   const submit = () => {
     setTouched(true);
@@ -116,7 +135,7 @@ export function ControlDialog({ request, title, description, confirmLabel, tone 
           {conflict ? (
             <Button variant="primary" onClick={reloadAndClose}>Tải lại trạng thái</Button>
           ) : (
-            <Button variant={tone} loading={mutation.isPending} disabled={!canSubmit} onClick={submit}>
+            <Button variant={tone} loading={mutation.isPending} disabled={!canSubmit} title={submitBlocker ?? undefined} onClick={submit}>
               {confirmLabel ?? CONTROL_ACTION_LABELS[request.action]}
             </Button>
           )}
@@ -130,7 +149,7 @@ export function ControlDialog({ request, title, description, confirmLabel, tone 
           submit();
         }}
       >
-        {children}
+        {extra}
         <Field
           id={reasonId}
           label="Lý do"
@@ -154,8 +173,16 @@ export function ControlDialog({ request, title, description, confirmLabel, tone 
             disabled={mutation.isPending}
           />
         </Field>
+        {submitBlocker ? <p className="text-sm text-amber-800">{submitBlocker}</p> : null}
         {mutation.isError ? (
           <ErrorState error={mutation.error} />
+        ) : null}
+        {isCutoverRequiredError(mutation.error) ? (
+          <p className="text-sm">
+            <Link to={cutoverSectionPath(request.channelId)} onClick={onClose} className="font-medium text-indigo-700 hover:underline">
+              Mở mục Cutover của kênh
+            </Link>
+          </p>
         ) : null}
         {conflict ? (
           <p className="text-sm text-slate-600">Trạng thái đã thay đổi ở nơi khác. Tải lại trạng thái rồi mở lại thao tác này.</p>

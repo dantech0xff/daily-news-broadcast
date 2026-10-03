@@ -179,7 +179,7 @@ describe('payloads', () => {
       prompt: { language: 'en', style: 'bullet', audience: 'Devs', customSystemPrompt: 'Viết ngắn gọn.' },
     });
     const update = toUpdateInput(recordToForm(record, META), META, record.version);
-    const { id: _id, version: _version, createdAt: _createdAt, updatedAt: _updatedAt, updatedBy: _updatedBy, platform: _platform, ...expected } = record;
+    const { id: _id, version: _version, createdAt: _createdAt, updatedAt: _updatedAt, updatedBy: _updatedBy, platform: _platform, cutoverRequired: _cutoverRequired, ...expected } = record;
     expect(update).toEqual({ version: 3, ...expected });
   });
 });

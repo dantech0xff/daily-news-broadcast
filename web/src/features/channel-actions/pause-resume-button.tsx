@@ -4,11 +4,15 @@ import type { ChannelStatus } from '../../api/types';
 import { IconPause, IconPlay } from '../../components/icons';
 import { OperatorButton } from '../../components/operator-button';
 import { Notice } from '../../components/states';
+import { isCutoverPending } from '../../lib/operations';
 import { ControlDialog, type ControlRequest } from './control-dialog';
+import { CUTOVER_BLOCKS_RESUME } from './cutover-notice';
 
 /**
  * Pause or Resume (whichever applies) with a confirmation dialog.
  * `expectedVersion` is the delivery-state `version` from the channel status.
+ * Resume stays disabled while the channel waits for its cutover instant;
+ * pausing is always possible.
  */
 export function PauseResumeButton({ channelId, channelName, status, size = 'sm' }: {
   channelId: string;
@@ -21,7 +25,8 @@ export function PauseResumeButton({ channelId, channelName, status, size = 'sm' 
   const version = status?.version ?? null;
   const unavailable = !status
     ? 'Đang tải trạng thái kênh'
-    : status.paused === null || version === null ? 'Kênh chưa có trạng thái giao hàng' : null;
+    : status.paused === null || version === null ? 'Kênh chưa có trạng thái giao hàng'
+    : paused && isCutoverPending(status) ? CUTOVER_BLOCKS_RESUME : null;
 
   const open = () => {
     if (!status || version === null) return;

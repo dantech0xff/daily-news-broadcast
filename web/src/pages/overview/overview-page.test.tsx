@@ -141,6 +141,53 @@ describe('OverviewPage', () => {
     expect(second?.idempotencyKey).toBe(first?.idempotencyKey);
   });
 
+  it('flags a channel that waits for its cutover instant and locks Resume and Run now', async () => {
+    renderApp({
+      routes: overviewRoutes({
+        'GET /api/channels': { body: { channels: [channelRecord({ cutoverRequired: true })] } },
+        'GET /api/channels/telegram-ops/status': {
+          body: channelStatus({ paused: true, version: 9, allowedActions: ['resume'], cutoverRequired: true, notBefore: null }),
+        },
+      }),
+    });
+
+    expect(await screen.findByText('Cần đặt mốc cutover trước khi kênh đăng bài.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Đặt mốc cutover' })).toHaveAttribute('href', '/channels/telegram-ops/edit#section-cutover');
+    const resume = await screen.findByRole('button', { name: 'Resume' });
+    expect(resume).toBeDisabled();
+    expect(resume).toHaveAttribute('title', 'Cần đặt mốc cutover (notBefore) trước khi resume');
+    const run = screen.getByRole('button', { name: 'Chạy ngay' });
+    expect(run).toBeDisabled();
+    expect(run).toHaveAttribute('title', 'Cần đặt mốc cutover (notBefore) trước khi chạy');
+    // Preview never sends, so it stays available.
+    expect(screen.getByRole('button', { name: 'Preview' })).toBeEnabled();
+  });
+
+  it('shows the cutover_required refusal with a way to the cutover section', async () => {
+    const { user } = renderApp({
+      routes: overviewRoutes({
+        // The status read predates the cutover flag (e.g. an older snapshot): the server still refuses.
+        'GET /api/channels/telegram-ops/status': { body: channelStatus({ paused: true, version: 9, allowedActions: ['resume'] }) },
+        'POST /api/channels/telegram-ops/control/resume': {
+          status: 409,
+          body: {
+            error: 'cutover_required',
+            message: 'Kênh cần đặt mốc cutover (notBefore) trước khi resume, chạy hoặc gửi lại bài, để chỉ bài publish sau mốc này được đăng.',
+          },
+        },
+      }),
+    });
+
+    await user.click(await screen.findByRole('button', { name: 'Resume' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Resume kênh Telegram Ops?' });
+    await user.type(within(dialog).getByLabelText(/Lý do/), 'Bắt đầu đăng');
+    await user.click(within(dialog).getByRole('button', { name: 'Resume kênh' }));
+
+    expect(await within(dialog).findByText(/Kênh cần đặt mốc cutover \(notBefore\)/)).toBeInTheDocument();
+    expect(within(dialog).getByText('Mở trang cấu hình kênh, đặt mốc ở mục Cutover rồi thử lại.')).toBeInTheDocument();
+    expect(within(dialog).getByRole('link', { name: 'Mở mục Cutover của kênh' })).toHaveAttribute('href', '/channels/telegram-ops/edit#section-cutover');
+  });
+
   it('locks the reason after a failure whose outcome is unknown, so the retry replays', async () => {
     const { user } = renderApp({
       routes: overviewRoutes({

@@ -5,11 +5,15 @@
 
 import type {
   ChannelMode,
+  ContentDateField,
   ContentStatus,
   ControlAction,
   CredentialKind,
   LimitKey,
+  RecoveryTarget,
   RunStatus,
+  SelectionStats,
+  SourceHealthEntry,
   TriggerType,
 } from '../api/types';
 
@@ -79,6 +83,87 @@ export const REJECT_REASON_LABELS: Readonly<Record<string, string>> = {
   low_score: 'Điểm thấp',
   duplicate: 'Trùng câu chuyện',
 };
+
+/** Which timestamp the library filters and sorts by. */
+export const CONTENT_DATE_FIELD_LABELS: Readonly<Record<ContentDateField, string>> = {
+  seen: 'Lần quét gần nhất',
+  published: 'Ngày đăng gốc',
+  delivered: 'Ngày đăng lên kênh',
+};
+
+/** Delivery-store states of a delivery (queue items, recovery targets, run items). */
+export const DELIVERY_STATE_LABELS: Readonly<Record<string, string>> = {
+  pending_generation: 'Chờ tạo nội dung',
+  generating: 'Đang tạo nội dung',
+  generation_retry_pending: 'Chờ tự tạo lại nội dung',
+  manual_generation_retry_pending: 'Tạo nội dung lỗi, cần operator',
+  generation_exhausted: 'Tạo nội dung lỗi, hết lượt thử',
+  ready: 'Sẵn sàng gửi',
+  delivering: 'Đang gửi',
+  partial_retryable: 'Gửi một phần, sẽ tự thử lại',
+  output_manual_retry_required: 'Gửi lỗi, cần gửi lại thủ công',
+  output_exhausted: 'Gửi lỗi, hết lượt thử',
+  needs_reconciliation: 'Không rõ đã gửi hay chưa',
+  blocked_topology: 'Bị chặn: cấu hình output đã đổi',
+  succeeded: 'Đã đăng',
+  abandoned: 'Đã bỏ',
+};
+
+/** Delivery-store states of one output of a delivery. */
+export const OUTPUT_STATE_LABELS: Readonly<Record<string, string>> = {
+  pending: 'Chờ gửi',
+  attempting: 'Đang gửi',
+  automatic_retry_pending: 'Chờ tự gửi lại',
+  manual_retry_required: 'Gửi lỗi, cần gửi lại thủ công',
+  manual_retry_pending: 'Chờ gửi lại theo yêu cầu',
+  needs_reconciliation: 'Không rõ đã gửi hay chưa',
+  exhausted: 'Gửi lỗi, hết lượt thử',
+  succeeded: 'Đã gửi',
+  abandoned: 'Đã bỏ',
+};
+
+export const RECOVERY_TARGET_KIND_LABELS: Readonly<Record<RecoveryTarget['kind'], string>> = {
+  delivery: 'Mục giao hàng',
+  output: 'Output Telegram',
+  outbox: 'Bảo trì cache',
+};
+
+/** State label of a recovery target, by its kind. */
+export function recoveryStateLabel(target: Pick<RecoveryTarget, 'kind' | 'state'>): string {
+  if (target.kind === 'output') return labelOf(OUTPUT_STATE_LABELS, target.state);
+  if (target.kind === 'outbox') return target.state === 'dead_letter' ? 'Bảo trì lỗi (dead letter)' : target.state;
+  return labelOf(DELIVERY_STATE_LABELS, target.state);
+}
+
+export const SOURCE_HEALTH_LABELS: Readonly<Record<SourceHealthEntry['status'], string>> = {
+  healthy: 'Ổn',
+  empty: 'Rỗng',
+  failed: 'Lỗi',
+};
+
+/** Failure classes of a source fetch (`errorClass`). */
+export const ERROR_CLASS_LABELS: Readonly<Record<string, string>> = {
+  transport: 'Lỗi kết nối',
+  http: 'Lỗi HTTP',
+  parse: 'Lỗi đọc dữ liệu',
+  response_too_large: 'Phản hồi quá lớn',
+  invalid_shape: 'Dữ liệu sai định dạng',
+  unsupported_shape: 'Định dạng không hỗ trợ',
+  exception: 'Lỗi trong plugin nguồn',
+  identity_collision: 'Trùng ID nguồn',
+  unverified: 'Chưa xác minh được',
+  unknown: 'Không rõ',
+};
+
+/** The selection chain of a scan, in pipeline order. */
+export const SELECTION_STEPS: readonly (readonly [keyof SelectionStats, string])[] = [
+  ['fetched', 'Lấy về'],
+  ['fresh', 'Mới'],
+  ['uncovered', 'Chưa đưa tin'],
+  ['relevant', 'Đúng chủ đề'],
+  ['ranked', 'Sau chấm điểm'],
+  ['enqueued', 'Xếp hàng'],
+];
 
 export const CONTROL_ACTION_LABELS: Readonly<Record<ControlAction, string>> = {
   pause: 'Pause',

@@ -9,7 +9,7 @@
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
+import { Link, useLocation, useNavigate, useParams } from 'react-router';
 
 import { useApi } from '../../api/api-context';
 import { ApiError } from '../../api/client';
@@ -27,10 +27,11 @@ import { PageHeader } from '../../components/page-header';
 import { ErrorState, LoadingState, Notice, StaleDataNotice } from '../../components/states';
 import { useToast } from '../../components/toast';
 import { useSession } from '../../app/session';
+import { CutoverNotice } from '../../features/channel-actions/cutover-notice';
 import { PauseResumeButton } from '../../features/channel-actions/pause-resume-button';
 import { PreviewButton } from '../../features/channel-actions/preview-dialog';
 import { formatDateTime } from '../../lib/format';
-import { channelStateView } from '../../lib/operations';
+import { channelStateView, isCutoverPending } from '../../lib/operations';
 import { ChannelForm, DISCARD_CHANGES_STATE } from './channel-form';
 import { createEmptyForm, recordToForm, toCreateInput, toUpdateInput } from './channel-form-model';
 
@@ -199,6 +200,15 @@ function LoadedChannelEditor({ record, status, meta, credentials, onReload }: {
   const initialValues = useMemo(() => recordToForm(base, meta), [base, meta]);
   const state = channelStateView(record, status);
   const stale = record.version > base.version;
+  const location = useLocation();
+
+  // Links such as the cutover notice's open a section of this page (`#section-cutover`);
+  // the form renders after the data loads, so scroll once it is there.
+  useEffect(() => {
+    if (!location.hash) return;
+    const target = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+    if (target && typeof target.scrollIntoView === 'function') target.scrollIntoView({ block: 'start' });
+  }, [location.hash, location.key]);
 
   return (
     <>
@@ -220,6 +230,7 @@ function LoadedChannelEditor({ record, status, meta, credentials, onReload }: {
         )}
       />
 
+      {isCutoverPending(status ?? record) ? <CutoverNotice channelId={record.id} className="mb-6" /> : null}
       {!canOperate ? (
         <Notice tone="info" className="mb-6">Bạn đang ở chế độ chỉ xem (viewer). Cần quyền operator để thay đổi cấu hình.</Notice>
       ) : null}
@@ -244,6 +255,7 @@ function LoadedChannelEditor({ record, status, meta, credentials, onReload }: {
         credentials={credentials}
         initialValues={initialValues}
         isNew={false}
+        cutoverRequired={record.cutoverRequired}
         readOnly={!canOperate}
         submitLabel="Lưu thay đổi"
         cancelTo="/channels"

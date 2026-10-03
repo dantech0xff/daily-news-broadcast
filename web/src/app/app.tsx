@@ -7,9 +7,11 @@ import { ToastProvider } from '../components/toast';
 import { ChannelCreatePage, ChannelEditPage } from '../pages/channels/channel-edit-page';
 import { ChannelsPage } from '../pages/channels/channels-page';
 import { NotFoundPage } from '../pages/not-found-page';
+import { LibraryPage } from '../pages/library/library-page';
+import { OperationsPage } from '../pages/operations/operations-page';
 import { OverviewPage } from '../pages/overview/overview-page';
-import { LibraryPage, OperationsPage, StatsPage } from '../pages/placeholder-page';
 import { SecretsPage } from '../pages/secrets/secrets-page';
+import { StatsPage } from '../pages/stats/stats-page';
 import { AppShell } from './app-shell';
 import { SessionProvider } from './session';
 

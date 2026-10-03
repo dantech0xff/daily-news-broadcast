@@ -39,7 +39,7 @@ describe('ChannelEditPage', () => {
 
     await waitFor(() => expect(mock.callsTo('PUT', '/api/channels/telegram-ops')).toHaveLength(1));
     const body = mock.callsTo('PUT', '/api/channels/telegram-ops')[0]?.body as Record<string, unknown>;
-    const { id: _id, platform: _platform, createdAt: _createdAt, updatedAt: _updatedAt, updatedBy: _updatedBy, version: _version, ...rest } = channelRecord();
+    const { id: _id, platform: _platform, createdAt: _createdAt, updatedAt: _updatedAt, updatedBy: _updatedBy, version: _version, cutoverRequired: _cutoverRequired, ...rest } = channelRecord();
     expect(body).toEqual({
       ...rest,
       version: 3,
@@ -154,6 +154,33 @@ describe('ChannelEditPage', () => {
     await user.click(screen.getByRole('link', { name: 'Kênh' }));
     await user.click(within(await screen.findByRole('dialog', { name: 'Rời trang khi còn thay đổi chưa lưu?' })).getByRole('button', { name: 'Bỏ thay đổi và rời trang' }));
     await waitFor(() => expect(router.state.location.pathname).toBe('/channels'));
+  });
+
+  it('explains a pending cutover, the queued-items caveat, and the batch delay bound', async () => {
+    const { user, router } = renderApp({
+      route: '/channels/telegram-ops/edit',
+      routes: editRoutes({
+        'GET /api/channels/telegram-ops': { body: channelRecord({ cutoverRequired: true }) },
+        'GET /api/channels/telegram-ops/status': {
+          body: channelStatus({ paused: true, version: 9, allowedActions: ['resume'], cutoverRequired: true }),
+        },
+      }),
+    });
+
+    expect(await screen.findByText('Cần đặt mốc cutover trước khi kênh đăng bài')).toBeInTheDocument();
+    expect(screen.getByText(/Kênh này bắt buộc có mốc cutover/)).toBeInTheDocument();
+    const caveat = screen.getByText(/Dời mốc muộn hơn không loại các bài đã xếp hàng; muốn bỏ chúng, hãy pause kênh rồi abandon từng mục trong/);
+    expect(within(caveat).getByRole('link', { name: 'Queue & vận hành' })).toHaveAttribute('href', '/operations?channel=telegram-ops');
+    expect(screen.getByLabelText(/Độ trễ giữa các bài/)).toHaveAccessibleDescription(/Số bài mỗi lượt × độ trễ tối đa 600\.000 ms \(10 phút\)\./);
+    const resume = await screen.findByRole('button', { name: 'Resume' });
+    await waitFor(() => expect(resume).toHaveAttribute('title', 'Cần đặt mốc cutover (notBefore) trước khi resume'));
+    expect(resume).toBeDisabled();
+
+    // The notice links to the cutover section of this same page.
+    await user.click(screen.getByRole('link', { name: 'Đặt mốc cutover' }));
+    expect(router.state.location.pathname).toBe('/channels/telegram-ops/edit');
+    expect(router.state.location.hash).toBe('#section-cutover');
+    expect(document.getElementById('section-cutover')).toHaveTextContent('Cutover');
   });
 
   it('is read-only for viewers', async () => {

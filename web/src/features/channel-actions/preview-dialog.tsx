@@ -18,6 +18,7 @@ import { OperatorButton } from '../../components/operator-button';
 import { ErrorState, LoadingState, Notice } from '../../components/states';
 import { formatDay, formatDuration, formatNumber } from '../../lib/format';
 import { MODE_LABELS, RUN_REASON_LABELS, labelOf } from '../../lib/labels';
+import { formatSelectionChain } from '../../lib/operations';
 
 export function PreviewButton({ channelId, channelName, size = 'sm' }: { channelId: string; channelName: string; size?: 'sm' | 'md' }) {
   const [open, setOpen] = useState(false);
@@ -73,6 +74,7 @@ export function PreviewDialog({ channelId, channelName, onClose }: { channelId: 
 
 export function PreviewResultView({ result }: { result: PreviewResult }) {
   const failedSources = result.sources.filter(source => source.status === 'failed');
+  const selection = formatSelectionChain(result.stats.selection);
   return (
     <div className="space-y-5 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -96,14 +98,10 @@ export function PreviewResultView({ result }: { result: PreviewResult }) {
         />
       </dl>
 
-      {result.stats.selection ? (
+      {selection ? (
         <div>
           <h3 className="mb-1 font-medium text-slate-700">Chuỗi lọc bài</h3>
-          <p className="text-slate-600">
-            {SELECTION_STEPS.filter(([key]) => result.stats.selection?.[key] !== undefined)
-              .map(([key, label]) => `${label}: ${formatNumber(result.stats.selection?.[key])}`)
-              .join(' → ')}
-          </p>
+          <p className="text-slate-600">{selection}</p>
         </div>
       ) : null}
 
@@ -151,15 +149,6 @@ const PREVIEW_STATUS_LABELS: Readonly<Record<string, string>> = {
   dry_run: 'Preview hoàn tất',
   failed: 'Preview thất bại',
 };
-
-const SELECTION_STEPS = [
-  ['fetched', 'Lấy về'],
-  ['fresh', 'Mới'],
-  ['uncovered', 'Chưa đưa tin'],
-  ['relevant', 'Đúng chủ đề'],
-  ['ranked', 'Sau chấm điểm'],
-  ['enqueued', 'Xếp hàng'],
-] as const;
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (

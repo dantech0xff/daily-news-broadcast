@@ -19,4 +19,9 @@
   dialog::backdrop {
     background-color: rgb(15 23 42 / 0.45);
   }
+
+  /* Section headings reached by a #fragment link stay clear of the sticky header. */
+  h2[id] {
+    scroll-margin-top: 5rem;
+  }
 }

@@ -82,6 +82,12 @@ export function formatDay(day: string | null | undefined): string {
   return match ? `${match[3]}/${match[2]}/${match[1]}` : EMPTY;
 }
 
+/** `YYYY-MM-DD` → `DD/MM` (chart axes). */
+export function formatShortDay(day: string | null | undefined): string {
+  const match = day ? /^\d{4}-(\d{2})-(\d{2})$/.exec(day) : null;
+  return match ? `${match[2]}/${match[1]}` : EMPTY;
+}
+
 /** Value for `<input type="datetime-local">` (browser time zone, minute precision). */
 export function toLocalInputValue(value: string | null | undefined): string {
   const date = parseInstant(value);

@@ -108,7 +108,12 @@ export interface Meta {
     audienceMaxLength: number;
     customSystemPromptMaxLength: number;
   };
-  limits: { ranges: Record<LimitKey, { min: number; max: number }>; defaults: ChannelLimits };
+  limits: {
+    ranges: Record<LimitKey, { min: number; max: number }>;
+    defaults: ChannelLimits;
+    /** Upper bound of `batchSize × delayMs` (reported on `limits.delayMs`). */
+    maxBatchDelayMs: number;
+  };
   credentials: {
     kinds: CredentialKind[];
     slots: { field: string; kind: CredentialKind }[];
@@ -198,6 +203,12 @@ export interface ChannelRecord extends ChannelConfig {
   createdAt: string;
   updatedAt: string;
   updatedBy: string | null;
+  /**
+   * Read-only system state (the seeded channel that takes over from the
+   * Cloudflare Worker): while `notBefore` is unset the server refuses resume,
+   * manual runs, and output retries with 409 `cutover_required`.
+   */
+  cutoverRequired: boolean;
 }
 
 /** `POST /api/channels` body; new channels are created paused. */
@@ -286,6 +297,8 @@ export interface ChannelStatus {
   cron: string;
   timezone: string;
   notBefore: string | null;
+  /** See `ChannelRecord.cutoverRequired`. */
+  cutoverRequired: boolean;
   dailyLimit: number;
   /** Config version, for `PUT /api/channels/:id`. */
   configVersion: number;

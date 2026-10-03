@@ -1,7 +1,33 @@
 /** Operational derivations shared by the overview and the queue/operations pages. */
 
-import type { ChannelRecord, ChannelStatus, RecoveryTarget } from '../api/types';
+import type { ChannelRecord, ChannelStatus, RecoveryTarget, SelectionStats } from '../api/types';
 import type { BadgeTone } from '../components/badge';
+import { formatNumber } from './format';
+import { SELECTION_STEPS } from './labels';
+
+/** Id of the cutover section heading of the channel form. */
+export const CUTOVER_SECTION_ID = 'section-cutover';
+
+/**
+ * Whether the channel still waits for its cutover instant: the server then
+ * refuses resume, manual runs, and output retries (409 `cutover_required`).
+ */
+export function isCutoverPending(channel: Pick<ChannelStatus, 'cutoverRequired' | 'notBefore'> | undefined): boolean {
+  return channel?.cutoverRequired === true && !channel.notBefore;
+}
+
+/** The cutover section of the channel's edit page. */
+export function cutoverSectionPath(channelId: string): string {
+  return `/channels/${encodeURIComponent(channelId)}/edit#${CUTOVER_SECTION_ID}`;
+}
+
+/** `Lấy về: 40 → Mới: 10 → …` for the steps the scan reported. */
+export function formatSelectionChain(selection: SelectionStats | null | undefined): string | null {
+  if (!selection) return null;
+  const steps = SELECTION_STEPS.filter(([key]) => selection[key] !== undefined && selection[key] !== null);
+  if (steps.length === 0) return null;
+  return steps.map(([key, label]) => `${label}: ${formatNumber(selection[key])}`).join(' → ');
+}
 
 /**
  * Delivery states that wait for an operator (the engine's "blocked" states);

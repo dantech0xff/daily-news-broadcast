@@ -18,8 +18,9 @@ import { Checkbox, describedBy, Field, Select, TextInput, Textarea } from '../..
 import { Notice } from '../../components/states';
 import { describeCron, nextRuns } from '../../lib/cron';
 import { issuesToFieldErrors } from '../../lib/errors';
-import { formatDateTime, fromLocalInputValue, toLocalInputValue } from '../../lib/format';
+import { formatDateTime, formatDuration, formatNumber, fromLocalInputValue, toLocalInputValue } from '../../lib/format';
 import { LIMIT_LABELS, MODE_LABELS, PROMPT_LANGUAGE_LABELS, PROMPT_STYLE_LABELS, labelOf } from '../../lib/labels';
+import { CUTOVER_SECTION_ID } from '../../lib/operations';
 import { COMMON_TIME_ZONES, allTimeZones, isValidTimeZone } from '../../lib/timezones';
 import { AiSection } from './ai-section';
 import { isSourcePath, validateChannelForm, type ChannelFormValues, type FieldErrors } from './channel-form-model';
@@ -41,6 +42,8 @@ export interface ChannelFormProps {
   credentials: Credential[];
   initialValues: ChannelFormValues;
   isNew: boolean;
+  /** The channel may not resume or run until its cutover instant is saved (system state, read-only). */
+  cutoverRequired?: boolean;
   readOnly: boolean;
   submitLabel: string;
   cancelTo: string;
@@ -49,7 +52,7 @@ export interface ChannelFormProps {
   onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function ChannelForm({ meta, credentials, initialValues, isNew, readOnly, submitLabel, cancelTo, onSubmit, onDirtyChange }: ChannelFormProps) {
+export function ChannelForm({ meta, credentials, initialValues, isNew, cutoverRequired = false, readOnly, submitLabel, cancelTo, onSubmit, onDirtyChange }: ChannelFormProps) {
   // Captured at mount: the parent remounts the form (new `key`) when it loads another version.
   const [initial] = useState(initialValues);
   const [values, setValues] = useState(initial);
@@ -165,6 +168,8 @@ export function ChannelForm({ meta, credentials, initialValues, isNew, readOnly,
         <LimitsSection form={form} />
         <CutoverSection
           form={form}
+          isNew={isNew}
+          cutoverRequired={cutoverRequired}
           initialNotBefore={initial.notBefore}
           changed={cutoverChanged}
           confirmed={cutoverConfirmed}
@@ -417,7 +422,11 @@ function LimitsSection({ form }: { form: ChannelFormApi }) {
           const range = meta.limits.ranges[key];
           const id = `limit-${key}`;
           const error = errorFor(`limits.${key}`);
-          const hint = `${LIMIT_LABELS[key].hint} Từ ${range.min} đến ${range.max}; mặc định ${meta.limits.defaults[key]}.`;
+          // The server also bounds batchSize × delayMs, so one run cannot hold the shared run queue for long.
+          const combined = key === 'delayMs' && meta.limits.maxBatchDelayMs
+            ? ` ${LIMIT_LABELS.batchSize.label} × độ trễ tối đa ${formatNumber(meta.limits.maxBatchDelayMs)} ms (${formatDuration(meta.limits.maxBatchDelayMs)}).`
+            : '';
+          const hint = `${LIMIT_LABELS[key].hint} Từ ${range.min} đến ${range.max}; mặc định ${meta.limits.defaults[key]}.${combined}`;
           return (
             <Field key={key} id={id} label={LIMIT_LABELS[key].label} required error={error} hint={hint}>
               <TextInput
@@ -440,8 +449,10 @@ function LimitsSection({ form }: { form: ChannelFormApi }) {
   );
 }
 
-function CutoverSection({ form, initialNotBefore, changed, confirmed, onConfirmedChange }: {
+function CutoverSection({ form, isNew, cutoverRequired, initialNotBefore, changed, confirmed, onConfirmedChange }: {
   form: ChannelFormApi;
+  isNew: boolean;
+  cutoverRequired: boolean;
   initialNotBefore: string | null;
   changed: boolean;
   confirmed: boolean;
@@ -452,11 +463,18 @@ function CutoverSection({ form, initialNotBefore, changed, confirmed, onConfirme
     update('notBefore', current => ({ ...current, notBefore }));
     onConfirmedChange(false);
   };
+  const operations = isNew
+    ? 'Queue & vận hành'
+    : <Link to={`/operations?channel=${encodeURIComponent(values.id)}`} className="font-medium underline underline-offset-2 hover:no-underline">Queue & vận hành</Link>;
   return (
-    <FormSection id="section-cutover" title="Cutover" description="Mốc thời gian tối thiểu của bài được đăng. Chỉ operator được thay đổi.">
+    <FormSection id={CUTOVER_SECTION_ID} title="Cutover" description="Mốc thời gian tối thiểu của bài được đăng. Chỉ operator được thay đổi.">
       <Notice tone="warning" title="Thận trọng: mốc cutover quyết định bài nào được đăng">
         <p>Bài có thời điểm đăng gốc trước mốc này sẽ không bao giờ được đăng (bài không có thời điểm đăng vẫn được xét).</p>
         <p>Đặt mốc sai có thể làm đăng lại bài cũ hoặc bỏ sót bài mới. Chỉ đổi khi chuyển kênh giữa các hệ thống (ví dụ từ Cloudflare Worker sang dashboard này).</p>
+        <p>Dời mốc muộn hơn không loại các bài đã xếp hàng; muốn bỏ chúng, hãy pause kênh rồi abandon từng mục trong {operations}.</p>
+        {cutoverRequired ? (
+          <p className="font-semibold">Kênh này bắt buộc có mốc cutover: Resume, Chạy ngay và Gửi lại bị khoá cho tới khi mốc được lưu.</p>
+        ) : null}
       </Notice>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
