@@ -457,7 +457,12 @@ function normalizeInstant(value, label) {
   return instant;
 }
 
-async function preview(channel, { cache, deliveryStore, buildEngine, clock, logger }) {
+/**
+ * Mode-aware read-only preview: one dry run that fetches and summarizes but
+ * never claims, sends, or writes delivery state. Shared with the app runtime.
+ * @returns {Promise<object>} The engine's dry-run result.
+ */
+export async function preview(channel, { cache, deliveryStore, buildEngine, clock, logger }) {
   logger.log(`👀 Preview: ${channel.id} (${channel.mode})`);
   const engine = buildEngine(channel, { cache, deliveryStore, clock });
   const result = channel.mode === 'drip'
@@ -563,11 +568,13 @@ export async function executeRecoveryControl(channel, action, {
         clock,
         'Generation retry',
       );
+      // Mirror the engine's summarize options so a retried generation uses the channel's prompt.
       const generated = await withOperationTimeout(signal => channel.ai.summarize(result.articles, {
-        language: 'vi',
+        language: channel.prompt?.language || 'vi',
         style: channel.prompt?.style,
         audience: channel.prompt?.audience,
         platform: channel.prompt?.platform,
+        ...(channel.prompt?.customSystemPrompt && { customSystemPrompt: channel.prompt.customSystemPrompt }),
         deliveryMode: result.delivery.mode,
         signal,
       }), timeoutMs, 'Generation retry');
