@@ -97,7 +97,7 @@ export class ContentRadar {
   setLogger(fn) { this.logger = fn; return this; }
 
   configure(options) {
-    this.options = { ...this.options, ...options, language: 'vi', secondaryLanguage: null };
+    this.options = { ...this.options, ...options, secondaryLanguage: null };
     this._machine = null;
     return this;
   }
@@ -1086,10 +1086,11 @@ export class ContentRadar {
     );
     const result = await withOperationTimeout(
       signal => this.ai.summarize(articles, {
-        language: 'vi',
+        language: this.options.language || 'vi',
         style: this.options.style,
         audience: this.options.audience,
         platform: this.options.platform,
+        ...(this.options.customSystemPrompt && { customSystemPrompt: this.options.customSystemPrompt }),
         deliveryMode: mode,
         signal,
       }),
