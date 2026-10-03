@@ -10,11 +10,14 @@ import {
   PUBLIC_ORIGIN,
   SERVICE_OPERATOR_ID,
   createAccessSigner,
+  createChannelViaApi,
   createCredentialsViaApi,
   httpRequest,
+  resumeViaApi,
   startTestApp,
+  waitForRun,
 } from './helpers/app-server.js';
-import { channelInput } from './helpers/runtime-fixture.js';
+import { channelInput, techArticle } from './helpers/runtime-fixture.js';
 
 const UI_MARKER = 'Content Radar UI build marker';
 
@@ -187,6 +190,68 @@ test('mutations need the exact public origin and a JSON content type', async t =
   const accepted = await app.api('/api/credentials', { as: 'operator', method: 'POST', body, contentType: 'application/json; charset=utf-8' });
   assert.equal(accepted.status, 201);
   assert.equal(accepted.headers['cache-control'], 'no-store');
+});
+
+test('every mutation route refuses a foreign origin or non-JSON body before touching anything; proxy headers never help', async t => {
+  const app = await startTestApp(t, { articles: [techArticle('rust-2', 'Rust 2.0 compiler ships async closures')] });
+  const ids = await createCredentialsViaApi(app.api);
+  await createChannelViaApi(app.api, ids);
+  assert.equal((await resumeViaApi(app.api, 'telegram-ops')).status, 200);
+  const snapshot = async () => ({
+    status: (await app.api('/api/channels/telegram-ops/status', { as: 'viewer' })).body,
+    channels: (await app.api('/api/channels', { as: 'viewer' })).body.channels.map(channel => [channel.id, channel.version, channel.name]),
+    credentials: (await app.api('/api/credentials', { as: 'viewer' })).body.credentials.map(credential => [credential.id, credential.updatedAt]),
+    runs: (await app.api('/api/channels/telegram-ops/runs', { as: 'viewer' })).body.page.total,
+    pluginCalls: [app.plugins.source.calls, app.plugins.ai.calls.length, app.plugins.output.calls.length],
+  });
+  const before = await snapshot();
+  assert.equal(before.status.paused, false, 'an active channel: a run that slipped through would deliver');
+
+  const routes = [
+    ['POST', '/api/channels', channelInput(ids, { id: 'cross-site-channel' })],
+    ['PUT', '/api/channels/telegram-ops', { version: 1, name: 'Renamed cross-site' }],
+    ['DELETE', '/api/channels/telegram-ops', { expectedVersion: 1 }],
+    ['POST', '/api/credentials', { label: 'Cross-site', kind: 'ai_api_key', value: 'cross-site-key' }],
+    ['PUT', `/api/credentials/${ids.aiKey}`, { value: 'cross-site-replacement' }],
+    ['DELETE', `/api/credentials/${ids.aiKey}`, {}],
+    ['POST', '/api/channels/telegram-ops/run', {}],
+    ['POST', '/api/channels/telegram-ops/preview', {}],
+    ['POST', '/api/channels/telegram-ops/control/pause', { idempotencyKey: 'cross-site-pause', expectedVersion: before.status.version, reason: 'Cross-site' }],
+  ];
+  const publicHost = new URL(PUBLIC_ORIGIN).host;
+  const attempts = [
+    { name: 'no Origin', origin: null, status: 403, error: 'same_origin_required' },
+    { name: 'a foreign Origin', origin: 'https://evil.example', status: 403, error: 'same_origin_required' },
+    // A check derived from the request (Host or X-Forwarded-*) instead of PUBLIC_ORIGIN would accept these two.
+    { name: 'the Origin of the listening socket', origin: app.url, status: 403, error: 'same_origin_required' },
+    {
+      name: 'spoofed Host and forwarding headers',
+      origin: 'https://evil.example',
+      headers: { host: publicHost, 'x-forwarded-host': publicHost, 'x-forwarded-proto': 'https' },
+      status: 403,
+      error: 'same_origin_required',
+    },
+    { name: 'a form body', contentType: 'application/x-www-form-urlencoded', status: 415, error: 'unsupported_media_type' },
+    { name: 'a text body', contentType: 'text/plain', status: 415, error: 'unsupported_media_type' },
+  ];
+  for (const [method, path, body] of routes) {
+    for (const attempt of attempts) {
+      const label = `${method} ${path} with ${attempt.name}`;
+      const response = await app.api(path, {
+        as: 'operator', method, body, origin: attempt.origin, contentType: attempt.contentType, headers: attempt.headers,
+      });
+      assert.equal(response.status, attempt.status, label);
+      assert.equal(response.body.error, attempt.error, label);
+      assert.equal(response.headers['cache-control'], 'no-store', label);
+    }
+  }
+  assert.deepEqual(await snapshot(), before, 'no refused mutation changed state or reached a source, the AI, or Telegram');
+
+  // The same run with the public origin and a JSON body is accepted and delivers.
+  const run = await app.api('/api/channels/telegram-ops/run', { as: 'operator', method: 'POST' });
+  assert.equal(run.status, 202, run.text);
+  assert.equal((await waitForRun(app.api, run.body.runId)).status, 'success');
+  assert.equal(app.plugins.output.calls.length, 1);
 });
 
 test('JSON bodies are limited to 8 KB, except channel create/update at 64 KB', async t => {

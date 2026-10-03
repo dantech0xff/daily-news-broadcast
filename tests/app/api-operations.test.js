@@ -9,6 +9,7 @@ import { SQLiteDeliveryStore } from '../../src/core/sqlite-delivery-store.js';
 import { RecordingAI, RecordingOutput, RecordingSource } from '../helpers/fakes.js';
 import {
   OPERATOR_EMAIL,
+  SECRET_VALUES,
   createChannelViaApi,
   createCredentialsViaApi,
   resumeViaApi,
@@ -23,16 +24,21 @@ const ARTICLES = [
 ];
 const MANUAL_FAILURE = { success: false, meta: { deliveryState: 'definitive_failure', retryDisposition: 'manual', sanitizedError: 'rejected' } };
 
-/** Operator actions as audited in the delivery store (read through a second connection). */
-async function readOperatorActions(dataDir) {
+/** One delivery-store table as persisted (read through a second connection). */
+async function readDeliveryTable(dataDir, table) {
   const db = openDatabase({ dataDir });
   try {
     const store = new SQLiteDeliveryStore(createNodeSqlStorage(db));
     await store.initialize();
-    return await store.list('operator_actions');
+    return await store.list(table);
   } finally {
     closeDatabase(db);
   }
+}
+
+/** Operator actions as audited in the delivery store. */
+function readOperatorActions(dataDir) {
+  return readDeliveryTable(dataDir, 'operator_actions');
 }
 
 async function activeChannel(app, overrides = {}) {
@@ -336,6 +342,99 @@ test('unresolved deliveries are listed with their allowed actions and can be aba
   });
   assert.equal(unknownTarget.status, 404);
   assert.equal(unknownTarget.body.error, 'target_not_found');
+});
+
+test('recovery targets and run history carry identifiers, states, versions, and titles only, page by page', async t => {
+  const summary = 'Private generated summary that only the content library shows';
+  const systemPrompt = 'Private operator system prompt of this channel';
+  const failure = {
+    success: false,
+    error: 'provider body={"api_key":"raw-api-key"}',
+    meta: { deliveryState: 'definitive_failure', retryDisposition: 'manual', sanitizedError: 'rejected at https://secret.example/hook Bearer raw-bearer' },
+  };
+  const app = await startTestApp(t, { articles: ARTICLES, aiText: summary, outputResults: [failure, failure] });
+  const { record } = await activeChannel(app, {
+    prompt: { language: 'vi', style: 'digest', audience: 'IT', customSystemPrompt: systemPrompt },
+    limits: { batchSize: 2, delayMs: 0, dailyLimit: 5, maxArticles: 18, maxArticlesPerSource: 5, concurrency: 5 },
+  });
+  const queued = await app.api(`/api/channels/${record.id}/run`, { as: 'operator', method: 'POST' });
+  const run = await waitForRun(app.api, queued.body.runId);
+  assert.equal(run.status, 'failed');
+
+  const path = `/api/channels/${record.id}/unresolved`;
+  const all = (await app.api(`${path}?limit=100`, { as: 'viewer' })).body;
+  assert.equal(all.page.total, 4, 'two failed deliveries and their two outputs');
+  const pages = [
+    (await app.api(`${path}?limit=3&offset=0`, { as: 'viewer' })).body,
+    (await app.api(`${path}?limit=3&offset=3`, { as: 'viewer' })).body,
+  ];
+  assert.deepEqual(pages.map(page => [page.page.total, page.targets.length]), [[4, 3], [4, 1]]);
+  assert.deepEqual(pages.flatMap(page => page.targets), all.targets, 'pages split one stable order');
+  assert.deepEqual(Object.keys(all.channel).sort(), ['allowedActions', 'channelId', 'expectedVersion', 'state']);
+  const targetFields = new Set(['kind', 'deliveryId', 'outputKey', 'outboxId', 'state', 'expectedVersion', 'allowedActions', 'title', 'articleCount', 'mode', 'publishingDay']);
+  for (const target of all.targets) {
+    assert.deepEqual(Object.keys(target).filter(key => !targetFields.has(key)), [], JSON.stringify(target));
+    assert.ok(Number.isSafeInteger(target.expectedVersion));
+  }
+  assert.deepEqual([...new Set(all.targets.map(target => target.title))].sort(), ARTICLES.map(article => article.title).sort());
+
+  const history = [
+    (await app.api(`/api/channels/${record.id}/runs`, { as: 'viewer' })).body,
+    (await app.api(`/api/runs/${run.id}`, { as: 'viewer' })).body,
+  ];
+  const outputErrors = history[1].stats.outputResults.map(entry => entry.error);
+  assert.equal(outputErrors.length, 2);
+  for (const error of outputErrors) assert.match(error, /^rejected at /, 'redaction keeps the generic context');
+
+  const exposed = JSON.stringify({ all, pages, history });
+  for (const hidden of [
+    summary, systemPrompt, ...ARTICLES.map(article => article.content), 'recording:destination',
+    'raw-api-key', 'secret.example', 'raw-bearer', ...Object.values(SECRET_VALUES),
+  ]) {
+    assert.equal(exposed.includes(hidden), false, hidden);
+  }
+});
+
+test('controls stay inside their channel: unknown channels and another channel\'s targets change nothing', async t => {
+  const app = await startTestApp(t, { articles: [ARTICLES[0]], outputResults: [MANUAL_FAILURE] });
+  const { ids, record } = await activeChannel(app);
+  const queued = await app.api(`/api/channels/${record.id}/run`, { as: 'operator', method: 'POST' });
+  await waitForRun(app.api, queued.body.runId);
+  const other = await createChannelViaApi(app.api, ids, { id: 'telegram-alt', name: 'Telegram Alt' });
+  assert.equal((await resumeViaApi(app.api, other.id)).status, 200);
+
+  const unresolved = (await app.api(`/api/channels/${record.id}/unresolved`, { as: 'viewer' })).body;
+  const delivery = unresolved.targets.find(target => target.kind === 'delivery');
+  const output = unresolved.targets.find(target => target.kind === 'output');
+  assert.ok(delivery && output, JSON.stringify(unresolved));
+  const before = {
+    actions: await readOperatorActions(app.dataDir),
+    channels: await readDeliveryTable(app.dataDir, 'channel_state'),
+    attempts: await readDeliveryTable(app.dataDir, 'attempts'),
+    sends: app.plugins.output.calls.length,
+  };
+
+  const outputTarget = { expectedVersion: output.expectedVersion, deliveryId: output.deliveryId, outputKey: output.outputKey };
+  const attempts = [
+    ['/api/channels/no-such-channel/control/pause', { expectedVersion: 1 }, 'channel_not_found'],
+    ['/api/channels/no-such-channel/control/abandon', { expectedVersion: delivery.expectedVersion, deliveryId: delivery.deliveryId }, 'channel_not_found'],
+    [`/api/channels/${other.id}/control/abandon`, { expectedVersion: delivery.expectedVersion, deliveryId: delivery.deliveryId }, 'target_not_found'],
+    [`/api/channels/${other.id}/control/retry-output`, outputTarget, 'target_not_found'],
+    [`/api/channels/${other.id}/control/confirm-delivered`, outputTarget, 'target_not_found'],
+  ];
+  for (const [index, [path, target, error]] of attempts.entries()) {
+    const response = await app.api(path, {
+      as: 'operator', method: 'POST', body: { idempotencyKey: `cross-${index}`, reason: 'Not this channel', ...target },
+    });
+    assert.equal(response.status, 404, `${path}: ${response.text}`);
+    assert.equal(response.body.error, error, path);
+  }
+
+  assert.deepEqual(await readOperatorActions(app.dataDir), before.actions, 'no operator action was recorded');
+  assert.deepEqual(await readDeliveryTable(app.dataDir, 'channel_state'), before.channels, 'no channel state was created or changed');
+  assert.deepEqual(await readDeliveryTable(app.dataDir, 'attempts'), before.attempts, 'no attempt was claimed');
+  assert.equal(app.plugins.output.calls.length, before.sends, 'nothing was sent');
+  assert.deepEqual((await app.api(`/api/channels/${record.id}/unresolved`, { as: 'viewer' })).body, unresolved);
 });
 
 test('without the runtime lease runs and resumes answer 503 while pause and reads still work', async t => {

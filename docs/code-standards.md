@@ -3,19 +3,27 @@
 ## Runtime Baseline
 
 - Use ES modules only.
-- Target Node.js runtime `>=18` and Cloudflare Workers with `nodejs_compat`; use Node.js `>=22` for the pinned Workers development/test toolchain.
-- Avoid a build step for runtime code.
+- Target Node.js `>=18` for the CLI and core engine, and Cloudflare Workers with `nodejs_compat`; use Node.js `>=22` for the pinned Workers development/test toolchain.
+- The dashboard app (`src/app/`) needs Node.js `>=22.13` for `node:sqlite`; the Docker image runs Node 24. Use only `node:sqlite` APIs available in both.
+- Avoid a build step for runtime code. The one exception is the dashboard UI in `web/`, which Vite builds to `web/dist`.
 - Keep core behavior runnable with native `fetch()` only.
+
+## Languages
+
+- Backend, engine, plugins, scripts, and tests are plain JavaScript with JSDoc types. No TypeScript there.
+- **Exception:** `web/` is React + Vite + TypeScript with `strict` on. It has its own `package.json`; `npm run test:web` runs `tsc -b` and Vitest. The exception does not extend to anything outside `web/`.
 
 ## Naming
 
 | Element | Convention | Example |
 |---|---|---|
-| Files | `kebab-case` | `openai-compat.js` |
+| Files | `kebab-case` | `openai-compat.js`, `channel-edit-page.tsx` |
 | Classes | PascalCase | `ContentRadar`, `TelegramOutput` |
 | Factories | `camelCase` | `groq()`, `buildPrompt()` |
 | Private fields | `_` prefix | `this._config` |
 | Internal helper files | `_` prefix | `_prompts.js` |
+| Node tests | `*.test.js` | `tests/app/api-auth.test.js` |
+| Browser E2E specs | `*.e2e.js` (never `*.test.js`, which the Node runner collects) | `tests/e2e/dashboard-flow.e2e.js` |
 
 ## Plugin Contracts
 
@@ -64,13 +72,15 @@ Rules:
 | Local lock upgrade | Stop and drain every older process sharing the store before stale canonical-lock conversion; never perform this compatibility migration during a rolling mixed-version start |
 | Output order | Sequential, not parallel; commit each attempt before the next call |
 | Retry handling | Respect `deliveryState` and `retryDisposition`; do not invent extra semantics |
+| App schema | Add app tables and columns only through a new entry in `APP_MIGRATIONS` (append-only; never edit an applied entry); migrations run after a `VACUUM INTO` backup |
 
 ## Concurrency And State
 
 - Source fetches are batched by channel concurrency with a short delay between batches.
-- Channels run sequentially in the runner to avoid resource contention.
+- Channels run sequentially in the runner to avoid resource contention; the dashboard app runs one channel at a time through one global queue.
 - Cloudflare delivery uses one Durable Object per channel.
-- Local Node/dashboard delivery uses one owned file store per process.
+- The Node CLI uses one owned file store per process.
+- The dashboard app keeps the delivery store and its own tables in one SQLite file, written only by the instance holding the runtime lease (pause is the one control allowed without it).
 - Cloudflare domain records use physical SQLite tables with an application migration ledger and materialized hot-query columns.
 - `MemoryCache` is acceptable for tests and dry-run preview, but not for output-capable paths.
 - Preview is read-only for delivery state, not a no-op AI path.
@@ -80,23 +90,43 @@ Rules:
 
 - Treat article text, URLs, and metadata as untrusted input.
 - Redact secrets, private URLs, and large opaque values from status and error surfaces.
-- Use distinct trigger and operator credentials.
-- Dashboard responses must send `Cache-Control: no-store`.
-- Non-loopback dashboard startup must satisfy the HTTPS/origin/proxy policy.
+- Use distinct trigger and operator credentials for the Worker.
+- Never print, log, or commit environment values or secrets. Configuration errors name the variable and the rule, never the value. Avoid commands that print resolved environments (`printenv`, `env`, `docker compose config` without `--no-env-resolution`, `docker inspect` environment output).
+
+### Dashboard App Backend
+
+- Every request except `GET /healthz` verifies the Cloudflare Access JWT; never add an authentication bypass or trust identity headers without a verified token.
+- Every API response sends `Cache-Control: no-store`. Every mutation needs the `operator` role, the exact `PUBLIC_ORIGIN` as `Origin`, `Content-Type: application/json`, and a bounded body.
+- The audit actor (`operatorId`, `updatedBy`) always comes from the authenticated identity, never from a request body.
+- Secrets are write-only: the credential store offers create, replace, delete, and metadata. Plaintext is resolved only when a channel is built for a run, preview, or control, and it never reaches responses, logs, events, runs, or the library.
+- Project responses through allowlists (`src/app/api/redaction.js`) so new internal fields never leak by default; sanitize provider text with `sanitizeRuntimeError()`.
+- New channels start paused, and nothing may create an unpaused channel.
+
+### Dashboard UI (`web/`)
+
+- The UI is in Vietnamese; keep technical terms (cron, preview, queue, provider names) in English.
+- Stay inside the Content Security Policy: no inline scripts, no runtime `<style>` injection (no CSS-in-JS that writes styles at run time; Tailwind is compiled at build time), no `style=` attributes, and no remote assets. Everything is bundled.
+- Never render raw HTML from articles or AI output (`dangerouslySetInnerHTML` is not used). External links go through `ExternalLink`: http(s) only, `target="_blank"`, `rel="noopener noreferrer"`.
+- Keep nothing sensitive in `localStorage` or `sessionStorage`; credential inputs are password fields that are never pre-filled.
+- The server decides permissions; the UI only hides or disables controls for viewers. Enumerations and bounds come from `GET /api/meta`, not from a copy in the UI.
+- Keep one bundle (no lazily loaded route chunks), so a tab opened before a redeploy does not request chunks that no longer exist.
 
 ## Configuration
 
-- Read environment variables in the adapter layer.
+- Read environment variables in the adapter layer (`src/adapters/*` for the CLI and Worker, `src/app/config/env.js` for the dashboard app).
 - Pass config objects downward into channels and plugins.
 - Keep runtime defaults in checked-in config files, not in ad hoc shell state.
-- `DELIVERY_STORE_TYPE=file` is the only local delivery-store mode.
+- `DELIVERY_STORE_TYPE=file` is the only local delivery-store mode for the CLI.
 - `NEWS_RUNTIME_MODE` controls quiesced, bootstrap, and active behavior in Cloudflare.
 - X output configuration requires the stable non-secret `X_DESTINATION_ID`; never derive delivery topology from a logical channel label alone.
 
 ## Testing And Verification
 
 - Run the narrowest useful test first.
-- Use `npm run test:node`, `npm run test:workers`, and `npm test` for contract coverage.
+- `npm test` runs `npm run test:node` (every `tests/**/*.test.js` except `tests/workers`) and `npm run test:workers`.
+- `npm run test:web` typechecks the dashboard and runs its Vitest unit tests.
+- `npm run test:e2e` builds `web/dist` and runs the Playwright specs in `tests/e2e/` against the real app on `127.0.0.1:4310`; run `npx playwright install chromium` once first.
+- Tests run offline. Node tests load `tests/helpers/deny-network.js`; the E2E harness refuses non-loopback connections. Inject fakes through the existing seams (`channelFactories`, `keySet`, `cron`, `timers`, `clock`); production code has no test flags.
 - Use `node --check` on touched runtime files when the change affects execution paths.
 - Verify docs against source before publishing them.
 - Prefer preserving behavior and fixing the contract rather than weakening tests.

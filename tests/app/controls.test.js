@@ -12,7 +12,7 @@ import { opaqueId } from '../../src/core/delivery.js';
 import { AIPlugin } from '../../src/core/contracts.js';
 import { DeliveryStateMachine } from '../../src/core/delivery-state-machine.js';
 import { MemoryDeliveryStore } from '../../src/core/delivery-store.js';
-import { RecordingOutput } from '../helpers/fakes.js';
+import { RecordingAI, RecordingOutput, RecordingSource } from '../helpers/fakes.js';
 import {
   OPERATOR,
   SECRETS,
@@ -262,6 +262,58 @@ test('retry-output re-sends one failed output and confirm-delivered settles an a
   const gpu = library(env.runtime)['GPU kernels land in Linux 7.0'];
   assert.deepEqual([gpu.status, gpu.messageId], ['delivered', '777']);
   assert.equal((await env.runtime.getStatus(record.id)).mutationState, 'free');
+});
+
+test('an output retry is refused before any send or durable change once the channel points at another chat', async t => {
+  // One recording output per destination; its delivery key follows the chat ID like TelegramOutput's.
+  const outputs = new Map();
+  const outputFor = ({ chatId }) => {
+    if (!outputs.has(chatId)) outputs.set(chatId, new RecordingOutput({ key: `telegram:${chatId}`, results: [MANUAL_FAILURE] }));
+    return outputs.get(chatId);
+  };
+  const env = await startedFixture(t, {
+    runtimeOptions: {
+      channelFactories: {
+        createSources: () => [new RecordingSource([techArticle('rust-2', 'Rust 2.0 compiler ships async closures')])],
+        createAI: () => new RecordingAI('Tóm tắt'),
+        createOutput: outputFor,
+      },
+    },
+  });
+  const record = await createActiveChannel(env.runtime, env.credentialIds);
+  assert.equal((await env.runtime.runNow(record.id, OPERATOR, { wait: true })).status, 'failed');
+  const target = (await env.runtime.listUnresolved(record.id)).targets.find(entry => entry.kind === 'output');
+  assert.deepEqual(target.allowedActions, ['retry-output']);
+  const original = outputs.get(SECRETS.chatId);
+  assert.equal(original.calls.length, 1);
+
+  // The chat ID credential now names another chat; the failed post was meant for the old one.
+  const otherChat = '-1009999999999';
+  env.runtime.replaceCredential(env.credentialIds.chatId, { value: otherChat }, OPERATOR);
+  const before = {
+    actions: await operatorActions(env.deliveryStore, record.id),
+    attempts: await env.deliveryStore.list('attempts'),
+  };
+  const params = {
+    idempotencyKey: 'retry-after-chat-change', expectedVersion: target.expectedVersion,
+    deliveryId: target.deliveryId, outputKey: target.outputKey, reason: 'Retry after the chat changed',
+  };
+  const refused = await env.runtime.control(record.id, 'retry-output', params, OPERATOR).then(() => null, error => error);
+
+  assert.ok(refused instanceof RuntimeError);
+  assert.equal(refused.code, 'control_rejected');
+  assert.match(refused.message, /output topology changed/i);
+  assert.equal(outputs.get(otherChat)?.calls.length ?? 0, 0, 'nothing was sent to the new chat');
+  assert.equal(original.calls.length, 1, 'nothing was re-sent to the old chat');
+  assert.deepEqual(await operatorActions(env.deliveryStore, record.id), before.actions);
+  assert.deepEqual(await env.deliveryStore.list('attempts'), before.attempts);
+  assert.deepEqual((await env.runtime.listUnresolved(record.id)).targets.find(entry => entry.kind === 'output'), target);
+
+  // With the original chat restored, the same request (nothing was recorded for its key) goes through.
+  env.runtime.replaceCredential(env.credentialIds.chatId, { value: SECRETS.chatId }, OPERATOR);
+  const retried = await env.runtime.control(record.id, 'retry-output', params, OPERATOR);
+  assert.deepEqual([retried.deliveryState, retried.replayed], ['succeeded', false]);
+  assert.equal(original.calls.length, 2);
 });
 
 test('retry-generation uses the channel prompt language and custom system prompt', async t => {
