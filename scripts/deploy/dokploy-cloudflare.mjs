@@ -33,7 +33,9 @@ export const USAGE = `Usage: node scripts/deploy/dokploy-cloudflare.mjs <preflig
 
 Commands:
   preflight  Read-only checks: Dokploy version and API surface (OpenAPI), Cloudflare
-             token, Zero Trust organization, zone, service token, tunnel, DNS.
+             token, Zero Trust organization, zone, service token, tunnel, DNS; with
+             DOKPLOY_SOURCE=github also the GitHub provider, the repository, and the
+             Access bypass for GitHub's push webhooks.
   deploy     Preflight, then the idempotent deploy in this order: Access -> Dokploy
              app (deployed) -> tunnel ingress + cloudflared -> DNS.
   verify     Checks of the live deployment: Access in front, the service token works,
@@ -42,7 +44,10 @@ Commands:
 Options:
   deploy   --dry-run                  List the changes in order; read-only API calls only.
            --git-url <https url>      Default ${DEFAULTS.gitUrl}
-           --git-branch <branch>      Default ${DEFAULTS.gitBranch}
+           --git-branch <branch>      Default ${DEFAULTS.gitBranch}. Once the pull request
+                                      is merged, pass --git-branch master on every run: with
+                                      DOKPLOY_SOURCE=github each push to master then deploys,
+                                      and a run without the flag tracks the default again.
            --cloudflared-image <ref>  Default ${DEFAULTS.cloudflaredImage} (must be pinned)
            --wait-minutes <n>         How long to wait for a build (default ${DEFAULTS.waitMinutes}).
   verify   --redeploy-check           Also redeploy the app and confirm the data survives.
@@ -53,7 +58,17 @@ Options:
 Environment (shell or .env; values are never printed):
   DOKPLOY_URL, DOKPLOY_API_KEY, CF_API_TOKEN, CF_ACCOUNT_ID, CF_ZONE_ID, APP_HOSTNAME,
   APP_OPERATOR_EMAILS, APP_VIEWER_EMAILS (optional), CF_ACCESS_CLIENT_ID,
-  CF_ACCESS_CLIENT_SECRET (verify only).
+  CF_ACCESS_CLIENT_SECRET (verify; every command with DOKPLOY_BEHIND_ACCESS=true).
+  Optional:
+  DOKPLOY_BEHIND_ACCESS=true      The Dokploy panel is behind Cloudflare Access; its API
+                                  gets the CF_ACCESS_CLIENT_ID service token as well.
+  DOKPLOY_SOURCE=git|github       git (default): the public --git-url, deployed only when
+                                  this script runs. github: the Dokploy GitHub App provider,
+                                  so every push to --git-branch deploys.
+  DOKPLOY_GITHUB_PROVIDER=<name>  The GitHub provider to use when Dokploy has several.
+
+Switch to auto-deploy from master (after the merge):
+  DOKPLOY_SOURCE=github npm run deploy:dokploy -- --git-branch master
 `;
 
 /**
@@ -128,7 +143,7 @@ async function commandPreflight(ctx) {
 async function commandDeploy(ctx) {
   ctx.report.line(ctx.dryRun
     ? `Dry run for ${ctx.config.hostname}: only read-only API calls are made; planned changes are listed in order.`
-    : `Deploying ${ctx.config.hostname} (branch ${ctx.config.git.branch}).`);
+    : `Deploying ${ctx.config.hostname} (branch ${ctx.config.git.branch}${ctx.config.git.source === 'github' ? ', GitHub App source' : ''}).`);
   const preflight = await runPreflight(ctx);
   summarizePreflight(ctx, preflight);
   if (preflight.blockers.length > 0) {

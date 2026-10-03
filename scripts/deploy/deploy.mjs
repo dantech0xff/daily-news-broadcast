@@ -27,7 +27,7 @@ export async function runDeploy(ctx, facts) {
 
   ctx.report.section('2/4 Dokploy application');
   const location = await ensureProjectEnvironment(ctx);
-  const app = await ensureMainApplication(ctx, location, { authDomain, aud: access.aud });
+  const app = await ensureMainApplication(ctx, location, { authDomain, aud: access.aud }, facts.dokploy.github ?? null);
 
   ctx.report.section('3/4 Cloudflare Tunnel and cloudflared');
   const tunnel = await ensureTunnel(ctx);

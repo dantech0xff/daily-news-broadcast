@@ -6,13 +6,23 @@
  * Dokploy fields drift between versions (`projectId` became `environmentId`
  * in v0.25), so nothing is assumed: preflight reports a missing procedure, a
  * missing field, or a newly required field as a blocker before anything is
- * changed. Optional fields are sent only when the instance knows them.
+ * changed. Optional fields are sent only when the instance knows them, and
+ * the procedures and fields of one source (`DOKPLOY_SOURCE`) are checked
+ * only when the deploy uses that source.
  */
 
 /**
  * - `fields`: always sent and must exist on the instance (dotted paths are nested fields);
- * - `optional`: sent only when the instance schema has them.
- * @type {Readonly<Record<string, { method: 'GET'|'POST', fields: readonly string[], optional?: readonly string[] }>>}
+ * - `optional`: sent only when the instance schema has them;
+ * - `source`: the procedure is called, and checked, only with that `DOKPLOY_SOURCE`;
+ * - `sourceFields`: more `fields`, sent and checked only with that `DOKPLOY_SOURCE`.
+ * @type {Readonly<Record<string, {
+ *   method: 'GET'|'POST',
+ *   fields: readonly string[],
+ *   optional?: readonly string[],
+ *   source?: 'git'|'github',
+ *   sourceFields?: Readonly<Partial<Record<'git'|'github', readonly string[]>>>,
+ * }>>}
  */
 export const DOKPLOY_CALLS = Object.freeze({
   'project.all': { method: 'GET', fields: [] },
@@ -23,6 +33,16 @@ export const DOKPLOY_CALLS = Object.freeze({
     method: 'POST',
     fields: ['applicationId', 'customGitUrl', 'customGitBranch', 'customGitBuildPath'],
     optional: ['customGitSSHKeyId', 'watchPaths', 'enableSubmodules'],
+    source: 'git',
+  },
+  // The GitHub App source: the provider, the repositories it can see, and the source itself.
+  'github.githubProviders': { method: 'GET', fields: [], source: 'github' },
+  'github.getGithubRepositories': { method: 'GET', fields: ['githubId'], source: 'github' },
+  'application.saveGithubProvider': {
+    method: 'POST',
+    fields: ['applicationId', 'githubId', 'owner', 'repository', 'branch', 'buildPath', 'triggerType'],
+    optional: ['watchPaths', 'enableSubmodules'],
+    source: 'github',
   },
   'application.saveBuildType': {
     method: 'POST',
@@ -40,6 +60,8 @@ export const DOKPLOY_CALLS = Object.freeze({
       'healthCheckSwarm.Test', 'healthCheckSwarm.Interval', 'healthCheckSwarm.Timeout', 'healthCheckSwarm.Retries',
     ],
     optional: ['healthCheckSwarm.StartPeriod'],
+    // The GitHub source turns auto deploy back on when it is off.
+    sourceFields: { github: ['autoDeploy'] },
   },
   'application.deploy': { method: 'POST', fields: ['applicationId'] },
   'application.redeploy': { method: 'POST', fields: ['applicationId'] },
@@ -54,6 +76,7 @@ const MAX_DEPTH = 16;
  * @typedef {object} DokployContract
  * @property {string[]} problems Drift that blocks the deploy.
  * @property {string[]} notes Optional fields the instance does not know (they are left out).
+ * @property {string[]} procedures The procedures the deploy calls with this source; all of them are checked.
  * @property {{ field: string, types: string[] }|null} stopGrace Swarm stop grace period field of `application.update`, if any.
  * @property {(procedure: string, payload: Record<string, unknown>) => Record<string, unknown>} fit
  *   The payload with unsupported optional fields removed and `null` adapted to each field's schema.
@@ -61,19 +84,24 @@ const MAX_DEPTH = 16;
 
 /**
  * @param {unknown} doc OpenAPI 3.x document.
+ * @param {{ source?: 'git'|'github' }} [options] `source` (`DOKPLOY_SOURCE`, default `git`) selects
+ *   the source-specific procedures and fields; the others are neither called nor checked.
  * @returns {DokployContract}
  */
-export function analyzeDokployContract(doc) {
+export function analyzeDokployContract(doc, { source = 'git' } = {}) {
   const problems = [];
   const notes = [];
+  const procedures = Object.keys(DOKPLOY_CALLS).filter(procedure => (DOKPLOY_CALLS[procedure].source ?? source) === source);
   /** @type {Map<string, object|null>} */
   const schemas = new Map();
   if (!doc || typeof doc !== 'object' || !doc.paths || typeof doc.paths !== 'object') {
     problems.push('The instance OpenAPI document has no paths; the API surface cannot be verified.');
-    return { problems, notes, stopGrace: null, fit: (_procedure, payload) => payload };
+    return { problems, notes, procedures, stopGrace: null, fit: (_procedure, payload) => payload };
   }
 
-  for (const [procedure, spec] of Object.entries(DOKPLOY_CALLS)) {
+  for (const procedure of procedures) {
+    const spec = DOKPLOY_CALLS[procedure];
+    const fields = [...spec.fields, ...(spec.sourceFields?.[source] ?? [])];
     const pathItem = doc.paths[`/${procedure}`] ?? doc.paths[`/api/${procedure}`];
     if (!pathItem || typeof pathItem !== 'object') {
       problems.push(`${procedure} is missing (the deploy calls ${spec.method} /api/${procedure}).`);
@@ -91,13 +119,13 @@ export function analyzeDokployContract(doc) {
       problems.push(`${procedure} has no JSON input schema in the instance OpenAPI document, so its fields cannot be verified.`);
       continue;
     }
-    for (const path of spec.fields) {
+    for (const path of fields) {
       if (!schemaAt(doc, schema, path)) problems.push(`${procedure} has no field "${path}".`);
     }
     for (const path of spec.optional ?? []) {
       if (!schemaAt(doc, schema, path)) notes.push(`${procedure} has no optional field "${path}"; it is left out.`);
     }
-    const sent = new Set([...spec.fields, ...(spec.optional ?? [])]);
+    const sent = new Set([...fields, ...(spec.optional ?? [])]);
     const sentTop = new Set([...sent].map(path => path.split('.')[0]));
     // The Swarm stop grace period field is sent whenever the instance has one.
     if (procedure === 'application.update') {
@@ -123,6 +151,7 @@ export function analyzeDokployContract(doc) {
   return {
     problems,
     notes,
+    procedures,
     stopGrace,
     fit(procedure, payload) {
       const schema = schemas.get(procedure);

@@ -2,16 +2,19 @@
  * Preflight: read-only checks that everything the deploy needs is in place.
  * Anything that would make the deploy fail midway or expose the app is a
  * blocker; nothing is changed. The deploy command runs this first and stops
- * on any blocker.
+ * on any blocker. With `DOKPLOY_SOURCE=github` it also resolves the GitHub
+ * provider and the repository, and warns when GitHub's push webhooks would
+ * stop at Cloudflare Access.
  */
 
 import { ApiError } from './api-clients.mjs';
 import { describeDnsRecords, findAccessApps, findDnsRecords, findTunnels, isCnameTo, isRemotelyManaged, tunnelTarget } from './cloudflare-steps.mjs';
 import { MIN_DOKPLOY_VERSION, NAMES, SHUTDOWN_WAIT_SECONDS, STOP_GRACE_SECONDS, compareVersions, parseVersion } from './config.mjs';
-import { DOKPLOY_CALLS, analyzeDokployContract } from './dokploy-contract.mjs';
+import { analyzeDokployContract } from './dokploy-contract.mjs';
 import { locateDokployResources, publicRoutesOf, readApplication } from './dokploy-steps.mjs';
 import { parseEnvText } from './env-text.mjs';
-import { errorMessage } from './run-context.mjs';
+import { findWebhookBypassApps, githubWebhookTarget, resolveGithubSource } from './github-source.mjs';
+import { DeployStop, errorMessage } from './run-context.mjs';
 import { VaultKeyError, parseMasterKey } from '../../src/app/secrets/vault.js';
 
 const ACCESS_TEAM_SUFFIX = '.cloudflareaccess.com';
@@ -20,7 +23,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * @typedef {object} PreflightFacts
- * @property {{ version?: number[], contract?: import('./dokploy-contract.mjs').DokployContract }} dokploy
+ * @property {{
+ *   version?: number[],
+ *   contract?: import('./dokploy-contract.mjs').DokployContract,
+ *   github?: import('./github-source.mjs').GithubSource,
+ * }} dokploy `github` is resolved with `DOKPLOY_SOURCE=github` only.
  * @property {{ authDomain?: string, teamName?: string, serviceTokenId?: string, zoneName?: string, tunnelId?: string }} cloudflare
  */
 
@@ -45,6 +52,11 @@ export async function runPreflight(ctx) {
 
   ctx.report.section('Preflight: Dokploy');
   await checkDokploy(ctx, checks, result.facts.dokploy);
+  // Without the API surface (unreachable API or no OpenAPI document) a blocker already explains why.
+  if (ctx.config.git.source === 'github' && result.facts.dokploy.contract) {
+    ctx.report.section('Preflight: GitHub source');
+    await checkGithubSource(ctx, checks, result.facts.dokploy);
+  }
   ctx.report.section('Preflight: Cloudflare');
   await checkCloudflare(ctx, checks, result.facts.cloudflare);
   return result;
@@ -70,12 +82,12 @@ async function checkDokploy(ctx, checks, facts) {
   }
 
   try {
-    const contract = analyzeDokployContract(await ctx.dokploy.query('settings.getOpenApiDocument'));
+    const contract = analyzeDokployContract(await ctx.dokploy.query('settings.getOpenApiDocument'), { source: ctx.config.git.source });
     facts.contract = contract;
     ctx.contract = contract;
     for (const problem of contract.problems) checks.blocker(`Dokploy API drift: ${problem}`);
     if (contract.problems.length === 0) {
-      checks.ok(`The instance OpenAPI document has every procedure and field the deploy uses (${Object.keys(DOKPLOY_CALLS).length} procedures).`);
+      checks.ok(`The instance OpenAPI document has every procedure and field the deploy uses (${contract.procedures.length} procedures).`);
     }
     for (const note of contract.notes) checks.info(note);
     if (contract.stopGrace) {
@@ -274,6 +286,38 @@ async function checkCloudflare(ctx, checks, facts) {
       checks.blocker(`DNS already has ${describeDnsRecords(records)} for ${hostname}, which is not the content-radar tunnel. The deploy never overwrites DNS records: delete it or choose another APP_HOSTNAME.`);
     }
   });
+
+  if (ctx.config.git.source === 'github') await checkWebhookBypass(ctx, checks);
+}
+
+async function checkGithubSource(ctx, checks, facts) {
+  try {
+    const github = await resolveGithubSource(ctx);
+    facts.github = github;
+    checks.ok(`GitHub provider "${github.providerName}" (githubId ${github.githubId}) can see ${github.owner}/${github.repository}.`);
+  } catch (error) {
+    checks.blocker(error instanceof DeployStop ? error.message : `Cannot check the GitHub provider and repository: ${errorMessage(error)}`);
+  }
+}
+
+// A warning, not a blocker: the deploy itself works without the webhook; only pushes would not deploy.
+async function checkWebhookBypass(ctx, checks) {
+  const target = githubWebhookTarget(ctx.config.dokploy.url);
+  const webhook = `${target.host}${target.path}`;
+  if (target.isIp) {
+    checks.info('DOKPLOY_URL is an IP address, so the Access bypass for GitHub push webhooks is not checked.');
+    return;
+  }
+  try {
+    const names = await findWebhookBypassApps(ctx, target);
+    if (names.length > 0) {
+      checks.ok(`Access application "${names[0]}" has a Bypass policy for ${webhook}, so GitHub push webhooks can reach Dokploy.`);
+    } else {
+      checks.warn(`No Cloudflare Access application with a Bypass policy covers ${webhook} (the GitHub App's webhook on the DOKPLOY_URL host). While the Dokploy panel is behind Access, GitHub's push webhooks stop at the Access login and pushes do not deploy: add a self-hosted Access application for exactly that path with a Bypass (Everyone) policy. Dokploy verifies the webhook signature itself.`);
+    }
+  } catch (error) {
+    checks.warn(`Cannot check whether GitHub push webhooks get through Access to ${webhook}: ${errorMessage(error)}`);
+  }
 }
 
 async function verifyToken(ctx) {

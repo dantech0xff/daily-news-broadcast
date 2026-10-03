@@ -24,10 +24,21 @@ export const FAKE = Object.freeze({
   viewerEmail: 'viewer@example.test',
   originIp: '203.0.113.10',
   channelCreatedAt: '2026-10-03T08:00:00.000Z',
+  githubId: 'github-provider-0001',
+  githubProviderName: 'Dokploy-2026-10-01-g7i5b9',
+  githubOwner: 'dantech0xff',
+  githubRepository: 'daily-news-broadcast',
+  githubPrivateKey: 'github-app-private-key-SECRET-0005',
+  githubWebhookSecret: 'github-app-webhook-secret-SECRET-0006',
+  githubClientSecret: 'github-app-client-secret-SECRET-0007',
+  refreshToken: 'dokploy-deploy-webhook-token-SECRET-0008',
 });
 
 /** Every secret value the script must never print or write. */
-export const FAKE_SECRETS = Object.freeze([FAKE.dokployApiKey, FAKE.cfApiToken, FAKE.clientSecret, FAKE.tunnelToken]);
+export const FAKE_SECRETS = Object.freeze([
+  FAKE.dokployApiKey, FAKE.cfApiToken, FAKE.clientSecret, FAKE.tunnelToken,
+  FAKE.githubPrivateKey, FAKE.githubWebhookSecret, FAKE.githubClientSecret, FAKE.refreshToken,
+]);
 
 /**
  * @param {Record<string, string|undefined>} [overrides]
@@ -83,6 +94,13 @@ export function dokployOpenApi({ omit = [], require = {}, removeFields = {}, sto
       applicationId: id, customGitUrl: nullableText, customGitBranch: nullableText, customGitBuildPath: nullableText,
       customGitSSHKeyId: nullableText, watchPaths: { type: 'array', items: text, nullable: true }, enableSubmodules: { type: 'boolean' },
     }, ['applicationId', 'customGitUrl', 'customGitBranch', 'customGitBuildPath', 'customGitSSHKeyId', 'watchPaths']),
+    '/github.githubProviders': get([]),
+    '/github.getGithubRepositories': get([['githubId', true]]),
+    '/application.saveGithubProvider': post({
+      applicationId: id, repository: nullableText, branch: nullableText, owner: nullableText, buildPath: nullableText,
+      githubId: nullableText, watchPaths: { type: 'array', items: text, nullable: true }, enableSubmodules: { type: 'boolean' },
+      triggerType: { type: 'string', enum: ['push', 'tag'], default: 'push' },
+    }, ['applicationId', 'repository', 'branch', 'owner', 'buildPath', 'githubId', 'watchPaths', 'enableSubmodules']),
     '/application.saveBuildType': post({
       applicationId: id, buildType: { type: 'string', enum: ['dockerfile', 'heroku_buildpacks', 'paketo_buildpacks', 'nixpacks', 'static', 'railpack'] },
       dockerfile: nullableText, dockerContextPath: nullableText, dockerBuildStage: nullableText, herokuVersion: nullableText,
@@ -107,6 +125,7 @@ export function dokployOpenApi({ omit = [], require = {}, removeFields = {}, sto
       },
       healthCheckSwarm: { type: 'object', nullable: true, additionalProperties: false, properties: health },
       ...(stopGrace ? { stopGracePeriodSwarm: { type: 'integer', nullable: true } } : {}),
+      autoDeploy: { type: 'boolean' },
     }, ['applicationId']),
     '/application.deploy': post({ applicationId: id, title: text, description: text }, ['applicationId']),
     '/application.redeploy': post({ applicationId: id, title: text, description: text }, ['applicationId']),
@@ -143,9 +162,10 @@ export function dokployOpenApi({ omit = [], require = {}, removeFields = {}, sto
  *   deploymentLog?: string,
  *   zoneReadable?: boolean,
  *   rejectStopGrace?: boolean,
+ *   githubProviders?: ReturnType<typeof githubProvider>[],
  *   appResponder?: (request: { path: string, headers: Record<string, string>, platform: object }) => Response,
  *   onRequest?: (call: object, platform: object) => void,
- * }} [options]
+ * }} [options] `githubProviders` defaults to one provider that can see this repository.
  */
 export function createFakePlatform(options = {}) {
   let counter = 0;
@@ -156,6 +176,7 @@ export function createFakePlatform(options = {}) {
     projects: [],
     applications: new Map(),
     deployments: [],
+    githubProviders: options.githubProviders ?? [githubProvider()],
     failDeploymentOf: options.failDeploymentOf ?? null,
     deploymentLog: options.deploymentLog ?? 'Cloning repository\nBuilding image\nError: build failed',
   };
@@ -238,12 +259,37 @@ export function createFakePlatform(options = {}) {
       }
       case 'GET application.one': {
         const found = application(query.applicationId);
-        return found ? json(200, structuredClone(found)) : json(404, { message: 'Application not found', code: 'NOT_FOUND' });
+        if (!found) return json(404, { message: 'Application not found', code: 'NOT_FOUND' });
+        // Like Dokploy, the application comes with its GitHub provider row, GitHub App secrets included.
+        const provider = dokploy.githubProviders.find(entry => entry.githubId === found.githubId);
+        return json(200, { ...structuredClone(found), github: provider ? githubRow(provider) : null });
       }
       case 'POST application.saveGitProvider':
         return update(body.applicationId, {
           sourceType: 'git', customGitUrl: body.customGitUrl, customGitBranch: body.customGitBranch,
           customGitBuildPath: body.customGitBuildPath, customGitSSHKeyId: body.customGitSSHKeyId, watchPaths: body.watchPaths,
+        });
+      case 'GET github.githubProviders':
+        // Whole provider rows with the GitHub App secrets, in case a version returns them: they must never be printed.
+        return json(200, dokploy.githubProviders.map(provider => ({
+          ...githubRow(provider),
+          gitProvider: { gitProviderId: `git-${provider.githubId}`, name: provider.name, providerType: 'github', createdAt: '2026-10-01T00:00:00.000Z' },
+        })));
+      case 'GET github.getGithubRepositories': {
+        const provider = dokploy.githubProviders.find(entry => entry.githubId === query.githubId);
+        if (!provider) return json(404, { message: 'Github Provider not found', code: 'NOT_FOUND' });
+        return json(200, provider.repositories.map((fullName, index) => {
+          const [login, name] = fullName.split('/');
+          return { id: 1000 + index, name, full_name: fullName, private: false, owner: { login }, html_url: `https://github.com/${fullName}` };
+        }));
+      }
+      case 'POST application.saveGithubProvider':
+        if (!dokploy.githubProviders.some(entry => entry.githubId === body.githubId)) {
+          return json(404, { message: 'Github Provider not found', code: 'NOT_FOUND' });
+        }
+        return update(body.applicationId, {
+          sourceType: 'github', githubId: body.githubId, owner: body.owner, repository: body.repository, branch: body.branch,
+          buildPath: body.buildPath, triggerType: body.triggerType ?? 'push', watchPaths: body.watchPaths, enableSubmodules: body.enableSubmodules,
         });
       case 'POST application.saveBuildType':
         return update(body.applicationId, {
@@ -297,6 +343,17 @@ export function createFakePlatform(options = {}) {
       default:
         return json(404, { message: `No procedure ${target}`, code: 'NOT_FOUND' });
     }
+  }
+
+  function githubRow(provider) {
+    return {
+      githubId: provider.githubId,
+      githubAppName: `https://github.com/apps/${provider.name.toLowerCase()}`,
+      githubPrivateKey: FAKE.githubPrivateKey,
+      githubWebhookSecret: FAKE.githubWebhookSecret,
+      githubClientSecret: FAKE.githubClientSecret,
+      gitProviderId: `git-${provider.githubId}`,
+    };
   }
 
   function update(applicationId, fields) {
@@ -424,11 +481,21 @@ export function seedApplication(platform, { name, appName, environmentId, ...fie
     appName: `${appName ?? 'app'}-x7k2q9`,
     environmentId,
     description: null,
+    refreshToken: FAKE.refreshToken,
     env: null,
     buildArgs: null,
     buildSecrets: null,
     createEnvFile: true,
     sourceType: 'github',
+    githubId: null,
+    owner: null,
+    repository: null,
+    branch: null,
+    buildPath: '/',
+    triggerType: 'push',
+    autoDeploy: true,
+    watchPaths: null,
+    enableSubmodules: false,
     customGitUrl: null,
     customGitBranch: null,
     customGitBuildPath: null,
@@ -450,6 +517,37 @@ export function seedApplication(platform, { name, appName, environmentId, ...fie
   };
   platform.dokploy.applications.set(created.applicationId, created);
   return created;
+}
+
+/**
+ * A Dokploy GitHub App provider and the repositories (`owner/name`) its installation can see.
+ * @param {{ githubId?: string, name?: string, repositories?: string[] }} [fields]
+ */
+export function githubProvider({
+  githubId = FAKE.githubId,
+  name = FAKE.githubProviderName,
+  repositories = [`${FAKE.githubOwner}/${FAKE.githubRepository}`, `${FAKE.githubOwner}/another-repository`],
+} = {}) {
+  return { githubId, name, repositories };
+}
+
+/**
+ * The Cloudflare Access application that lets GitHub's push webhooks through
+ * to the Dokploy panel: the webhook path with a Bypass (Everyone) policy.
+ * @param {object} [overrides]
+ */
+export function webhookBypassApp(overrides = {}) {
+  const uri = `${new URL(FAKE.dokployUrl).hostname}/api/deploy/github`;
+  return {
+    id: 'access-app-github-webhook',
+    aud: 'aud-github-webhook',
+    name: 'Dokploy GitHub webhook',
+    type: 'self_hosted',
+    domain: uri,
+    destinations: [{ type: 'public', uri }],
+    policies: [{ id: 'policy-github-webhook', name: 'github-webhook-bypass', decision: 'bypass', include: [{ everyone: {} }], precedence: 1 }],
+    ...overrides,
+  };
 }
 
 /**

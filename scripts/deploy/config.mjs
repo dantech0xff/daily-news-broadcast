@@ -69,6 +69,14 @@ export const PUBLIC_ENV_KEYS = Object.freeze(new Set([
 
 export const COMMANDS = Object.freeze(['preflight', 'deploy', 'verify']);
 
+/**
+ * Where the app's code comes from (`DOKPLOY_SOURCE`): `git` pulls the public
+ * `--git-url` whenever the script deploys (no webhook, so a push alone
+ * deploys nothing); `github` uses the Dokploy GitHub App provider, whose push
+ * webhook deploys every push to `--git-branch`.
+ */
+export const SOURCES = Object.freeze(['git', 'github']);
+
 const DEPLOY_VARIABLES = Object.freeze([
   'DOKPLOY_URL', 'DOKPLOY_API_KEY', 'CF_API_TOKEN', 'CF_ACCOUNT_ID', 'CF_ZONE_ID',
   'APP_HOSTNAME', 'APP_OPERATOR_EMAILS', 'CF_ACCESS_CLIENT_ID',
@@ -93,6 +101,9 @@ const CLOUDFLARE_ID = /^[0-9a-f]{32}$/i;
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
 const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const GIT_BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
+const GITHUB_OWNER = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+const GITHUB_REPOSITORY = /^[A-Za-z0-9._-]{1,100}$/;
+const PROVIDER_NAME = /^[^\x00-\x1f\x7f]{1,200}$/;
 const IMAGE_REFERENCE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::([A-Za-z0-9_][A-Za-z0-9._-]{0,127}))?(@sha256:[a-f0-9]{64})?$/;
 
 /**
@@ -107,7 +118,12 @@ const IMAGE_REFERENCE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z
  * @property {string[]} operatorEmails Lowercase, unique.
  * @property {string[]} viewerEmails Lowercase, unique.
  * @property {{ clientId: string, clientSecret: string }} serviceToken `clientSecret` is non-enumerable.
- * @property {{ url: string, branch: string }} git
+ * @property {{
+ *   url: string, branch: string, source: 'git'|'github',
+ *   githubProvider: string|null, owner: string|null, repository: string|null,
+ * }} git `source` is `DOKPLOY_SOURCE` (see `SOURCES`). With `github`: `githubProvider` is
+ *   `DOKPLOY_GITHUB_PROVIDER` (`null`: use the only provider), and `owner`/`repository` are read
+ *   from the GitHub `url`; all three are `null` with `git`.
  * @property {string} cloudflaredImage Pinned image reference.
  * @property {number} waitMs How long to wait for one Dokploy build/deployment.
  * @property {string|null} originIp `--origin-ip` override for the origin probe.
@@ -144,6 +160,13 @@ export function readDeployConfig(env, { command, flags = {} }) {
   } else if (command !== 'verify' && read('CF_ACCESS_CLIENT_SECRET') === '') {
     warnings.push('CF_ACCESS_CLIENT_SECRET is not set: the deploy does not need it unless DOKPLOY_BEHIND_ACCESS=true, but the verify command does.');
   }
+  const source = readSource(read('DOKPLOY_SOURCE'), problems);
+  const githubProvider = read('DOKPLOY_GITHUB_PROVIDER') || null;
+  if (githubProvider !== null && !PROVIDER_NAME.test(githubProvider)) {
+    problems.push('DOKPLOY_GITHUB_PROVIDER must be the name of a Dokploy GitHub provider (at most 200 characters, no line breaks or control characters).');
+  } else if (githubProvider !== null && source !== 'github') {
+    warnings.push('DOKPLOY_GITHUB_PROVIDER is ignored: it applies only with DOKPLOY_SOURCE=github.');
+  }
 
   const dokployUrl = read('DOKPLOY_URL') ? readDokployUrl(read('DOKPLOY_URL'), problems) : null;
   if (dokployUrl?.startsWith('http://') && !isLoopbackUrl(dokployUrl)) {
@@ -166,6 +189,7 @@ export function readDeployConfig(env, { command, flags = {} }) {
   }
 
   const gitUrl = readGitUrl(stringFlag(flags['git-url']) ?? DEFAULTS.gitUrl, problems);
+  const githubRepository = source === 'github' ? readGithubRepository(gitUrl, problems) : null;
   const gitBranch = stringFlag(flags['git-branch']) ?? DEFAULTS.gitBranch;
   if (!GIT_BRANCH.test(gitBranch) || gitBranch.includes('..') || gitBranch.startsWith('/') || gitBranch.endsWith('/')) {
     problems.push('--git-branch must be a branch name such as feat/dokploy-dashboard or master.');
@@ -191,7 +215,14 @@ export function readDeployConfig(env, { command, flags = {} }) {
     operatorEmails,
     viewerEmails,
     serviceToken: { clientId },
-    git: { url: gitUrl, branch: gitBranch },
+    git: {
+      url: gitUrl,
+      branch: gitBranch,
+      source,
+      githubProvider: source === 'github' ? githubProvider : null,
+      owner: githubRepository?.owner ?? null,
+      repository: githubRepository?.repository ?? null,
+    },
     cloudflaredImage,
     waitMs: waitMinutes * 60_000,
     originIp,
@@ -254,6 +285,13 @@ export function compareVersions(left, right) {
 
 function stringFlag(value) {
   return typeof value === 'string' ? value.trim() : undefined;
+}
+
+function readSource(value, problems) {
+  const source = value === '' ? 'git' : value.toLowerCase();
+  if (SOURCES.includes(source)) return source;
+  problems.push('DOKPLOY_SOURCE must be git (the public Git URL, the default) or github (the Dokploy GitHub App provider).');
+  return 'git';
 }
 
 function readBooleanFlag(value, name, problems) {
@@ -331,6 +369,24 @@ function readGitUrl(value, problems) {
     problems.push('--git-url must be a public https Git URL without credentials, query, or fragment.');
   }
   return url.href;
+}
+
+// The GitHub provider takes the owner and repository of `https://github.com/<owner>/<repository>[.git]`.
+function readGithubRepository(href, problems) {
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return null; // Already reported as an invalid --git-url.
+  }
+  const [owner = '', name = '', ...rest] = url.pathname.replace(/^\/+|\/+$/g, '').split('/');
+  const repository = name.replace(/\.git$/i, '');
+  if (url.host !== 'github.com' || rest.length > 0 || !GITHUB_OWNER.test(owner)
+    || !GITHUB_REPOSITORY.test(repository) || repository === '.' || repository === '..') {
+    problems.push('DOKPLOY_SOURCE=github needs --git-url to be a GitHub repository URL such as https://github.com/<owner>/<repository>.git.');
+    return null;
+  }
+  return { owner, repository };
 }
 
 function readWaitMinutes(value, problems) {

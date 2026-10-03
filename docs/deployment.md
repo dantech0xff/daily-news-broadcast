@@ -156,9 +156,9 @@ Never roll back to a version from before the Durable Object class creation. If t
 | Access | Team domain `small-unit-70a7.cloudflareaccess.com`; self-hosted application "Content Radar" with the reusable policies `content-radar-users` (allow, operator + viewer emails) and `content-radar-agent-service-token` (`non_identity`, the agent service token); one-time PIN login method |
 | Dokploy | v0.30.8; project `content-radar`; application `content-radar` (service `content-radar-lm6hl8` on `dokploy-network`), volume `content-radar-data` at `/data`, 1 replica, `stop-first`, stop grace 135 s, health check `/healthz` |
 | Tunnel | `content-radar` (`c93bf8ce-a77d-4e8b-9f8e-40374af8bbef`), run by the Dokploy application `content-radar-cloudflared` (`cloudflare/cloudflared:2026.9.3`) |
-| Source branch | `feat/dokploy-dashboard`; switch the Dokploy source to `master` once the pull request is merged |
+| Source branch | `feat/dokploy-dashboard` through the custom Git provider, so a push deploys nothing; once the pull request is merged, switch to the GitHub App source on `master` ([Auto-deploy on push](#auto-deploy-on-push)) |
 
-The Dokploy panel (`deploy.dantech.academy`) is itself behind Cloudflare Access. To let the deploy script reach its API, the panel's Access application "Dokploy dashboard" also carries the `content-radar-agent-service-token` policy (added 2026-10-03, its existing email policy unchanged), and the operator environment sets `DOKPLOY_BEHIND_ACCESS=true`, which sends the service-token headers to the Dokploy API as well as the app — never to the Cloudflare API.
+The Dokploy panel (`deploy.dantech.academy`) is itself behind Cloudflare Access. To let the deploy script reach its API, the panel's Access application "Dokploy dashboard" also carries the `content-radar-agent-service-token` policy (added 2026-10-03, its existing email policy unchanged), and the operator environment sets `DOKPLOY_BEHIND_ACCESS=true`, which sends the service-token headers to the Dokploy API as well as the app — never to the Cloudflare API. A second Access application covers only `deploy.dantech.academy/api/deploy/github` with a Bypass policy, so the push webhooks of the Dokploy GitHub App reach Dokploy, which verifies their signature itself ([Auto-deploy on push](#auto-deploy-on-push)).
 
 Commands (credentials come from the operator's environment or `.env`; values are never printed):
 
@@ -173,6 +173,8 @@ npm run deploy:dokploy
 ```bash
 npm run deploy:verify -- --origin-ip <vps-ip> --redeploy-check
 ```
+
+Once the app deploys from the GitHub App source, the deploy command is `DOKPLOY_SOURCE=github npm run deploy:dokploy -- --git-branch master` ([Auto-deploy on push](#auto-deploy-on-push)). Without `DOKPLOY_SOURCE=github` a run moves the app back to the public Git URL, and without `--git-branch master` it moves it to `feat/dokploy-dashboard`.
 
 `--origin-ip` is needed because the Dokploy panel's own DNS name resolves to Cloudflare; use the origin address of the proxied A records and keep it out of the repository. Verification on 2026-10-03 passed 10/10: anonymous requests got a 302 to the Access login, the service token got `/api/health` 200 with the runtime lease held, `telegram-main` was paused with `cutoverRequired`, the origin answered Traefik's 404 for the hostname, there was no Traefik domain or published port, one replica with `stop-first`, and a redeploy kept the channel (same `createdAt`) with a single running instance. The first verification run hit a 503 on its first request because the container's first JWKS fetch exceeded jose's 5 s default; the app now allows 15 s and loads the keys right after it starts listening.
 
@@ -190,7 +192,7 @@ Browser ──HTTPS──> Cloudflare Access (email login or service token)
 
 | Setting | Value | Why |
 |---|---|---|
-| Source | This repository over public HTTPS (`saveGitProvider`), branch `feat/dokploy-dashboard` until it is merged, then `master` | The repository is public: no GitHub App or deploy key |
+| Source | `DOKPLOY_SOURCE=git` (default): this repository over public HTTPS (`saveGitProvider`), deployed when the script runs. `DOKPLOY_SOURCE=github`: the Dokploy GitHub App provider (`saveGithubProvider`), deployed on every push. Branch `feat/dokploy-dashboard` until it is merged, then `master` | The repository is public, so the Git URL needs no deploy key; only the GitHub App sends Dokploy a webhook on push |
 | Build | Dockerfile `Dockerfile`, context `.` | Web build stage, then `node:24-alpine`; the `# syntax=docker/dockerfile:1` line and `COPY --chmod` need BuildKit |
 | Replicas | 1 | One SQLite file, one scheduler |
 | Swarm update config | `{ "Parallelism": 1, "Order": "stop-first" }` | Dokploy applications default to `start-first`, which would briefly run two schedulers on one database; the runtime lease is the second guard |
@@ -229,6 +231,45 @@ Access exists before DNS, so the hostname is never reachable unprotected:
 Containers on `dokploy-network` can still reach the app directly, which is why the app verifies the Access JWT on every request itself.
 
 The deploy needs these in the operator's environment: `DOKPLOY_URL` and `DOKPLOY_API_KEY` (Dokploy v0.29.5 or later); `CF_API_TOKEN` with edit rights on Cloudflare Tunnel, Access apps and policies, Access organizations and identity providers, Access service tokens, and Zone DNS; `CF_ACCOUNT_ID`; `CF_ZONE_ID`; the hostname; the operator emails; and the service token as `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`. Check variable names only; never echo their values.
+
+Optional:
+
+- `DOKPLOY_BEHIND_ACCESS=true` when the Dokploy panel itself is behind Access: its API then gets the service-token headers too, which makes `CF_ACCESS_CLIENT_SECRET` required for every command.
+- `DOKPLOY_SOURCE`: `git` (default) or `github`; see [Auto-deploy on push](#auto-deploy-on-push).
+- `DOKPLOY_GITHUB_PROVIDER`: the name of the Dokploy GitHub provider to use when there are several.
+
+### Auto-deploy on push
+
+**Current state (2026-10-03).** The application pulls this repository over public HTTPS through Dokploy's custom Git provider (`saveGitProvider`), branch `feat/dokploy-dashboard`. Its `autoDeploy` is on with trigger `push`, but nothing sends Dokploy a webhook for a custom Git source, so a push deploys nothing. New commits reach production only when `npm run deploy:dokploy` runs (it redeploys every time) or someone clicks Deploy in Dokploy.
+
+**After the pull request is merged into `master`,** switch the source to the Dokploy GitHub App provider (already installed, with access to this repository) so that every push to `master` deploys:
+
+```bash
+DOKPLOY_SOURCE=github npm run deploy:preflight
+DOKPLOY_SOURCE=github npm run deploy:dokploy -- --git-branch master --dry-run
+DOKPLOY_SOURCE=github npm run deploy:dokploy -- --git-branch master
+```
+
+- The preflight picks the GitHub provider: the only one, or the one named by `DOKPLOY_GITHUB_PROVIDER`. It blocks when there is none, when there are several and none is named, or when the provider cannot see `dantech0xff/daily-news-broadcast`. It warns, without blocking, when no Access application with a Bypass policy covers `deploy.dantech.academy/api/deploy/github`: the webhook URL Dokploy gave the GitHub App, which the check assumes is on the `DOKPLOY_URL` host.
+- The dry run should list exactly two calls: `application.saveGithubProvider` (provider, owner, repository, branch `master`, build path `/`, trigger `push`) and `application.deploy`.
+- The deploy saves the source only when it differs, turns `autoDeploy` on if it is off, and deploys once from `master`. The environment, `APP_MASTER_KEY`, volume, Swarm settings, Access, and the tunnel stay as they are. A re-run changes nothing except the usual redeploy.
+- Afterwards keep `DOKPLOY_SOURCE=github` in the operator `.env` and pass `--git-branch master` on every run. The default branch is still `feat/dokploy-dashboard`: a run without the flag moves the source back to it, with a warning, and a run without `DOKPLOY_SOURCE=github` moves it back to the public Git URL. Either way, pushes to `master` stop deploying.
+- After the first push to `master`, check that Dokploy lists a new deployment of `content-radar` for it. If none appears, the GitHub App's Recent Deliveries (its advanced settings on GitHub) show whether the webhook reached Dokploy.
+
+What a push to `master` then does:
+
+1. GitHub sends the push event to the GitHub App's webhook, `https://deploy.dantech.academy/api/deploy/github`. Cloudflare Access lets it through because an Access application with a Bypass policy covers exactly that path, and Dokploy verifies the webhook signature with the App's secret.
+2. Dokploy queues a deployment for each application whose GitHub source matches the push (provider, owner, repository, branch `master`) and has `autoDeploy` on with trigger `push`.
+3. Dokploy builds the image from the Dockerfile on the VPS. If the build fails, the deployment ends in error and the running container keeps serving.
+4. Swarm swaps the container `stop-first`. The old container gets SIGTERM, stops scheduling, and waits up to `SHUTDOWN_WAIT_SECONDS` (120 s) for a run in flight; the stop grace period is 135 s. It then releases the runtime lease and closes the database. The new container starts on the same `content-radar-data` volume at `/data`, makes a `VACUUM INTO` backup before any schema migration, serves `/healthz`, and takes the lease before it schedules anything.
+5. Cloudflare Tunnel and cloudflared do not change. The service name on `dokploy-network` stays the same, so `https://radar.dantech.academy` answers again as soon as the new container listens.
+
+Keep in mind:
+
+- A push deploys code only. Environment, volume, Swarm, Access, and tunnel changes still go through `DOKPLOY_SOURCE=github npm run deploy:dokploy -- --git-branch master`.
+- Watch paths set on the application in Dokploy limit which pushes deploy. The deploy warns about them and clears them only when it saves the source again.
+- Every push to `master` goes to production. Merge through pull requests with the tests green. No CI runs `npm test`, so run it locally before merging.
+- A new container that fails at startup is not rolled back, because the old one is already stopped. Revert the commit on `master`, which deploys again.
 
 ### Verification Checklist
 

@@ -3,12 +3,14 @@
  * (project → production environment → applications), so a re-run creates
  * nothing twice, and each setting is written only when it differs.
  *
- * - The app: this repository's Dockerfile from public Git, one replica,
- *   Swarm update `stop-first` (read back before deploying: start-first would
- *   run two schedulers on one SQLite file), a health check on `/healthz`, a
- *   named volume at `/data`, and the production environment. The existing
- *   `APP_MASTER_KEY` is always reused; a new one is generated only when none
- *   exists, passed straight to Dokploy, and never printed.
+ * - The app: this repository's Dockerfile from public Git (or, with
+ *   `DOKPLOY_SOURCE=github`, from the Dokploy GitHub App provider, so pushes
+ *   deploy; see `github-source.mjs`), one replica, Swarm update `stop-first`
+ *   (read back before deploying: start-first would run two schedulers on one
+ *   SQLite file), a health check on `/healthz`, a named volume at `/data`,
+ *   and the production environment. The existing `APP_MASTER_KEY` is always
+ *   reused; a new one is generated only when none exists, passed straight to
+ *   Dokploy, and never printed.
  * - cloudflared: the pinned image, `TUNNEL_TOKEN` passed straight from the
  *   Cloudflare API into Dokploy, and the arguments `tunnel run`.
  * - Neither gets a Dokploy domain (Traefik route) or a published port.
@@ -18,6 +20,8 @@ import { CLOUDFLARED_ARGS, DATA_MOUNT_PATH, NAMES, NANOSECONDS_PER_SECOND, STOP_
 import { ApiError, isDryRun } from './api-clients.mjs';
 import { fetchTunnelToken, readTunnelStatus } from './cloudflare-steps.mjs';
 import { EnvTextError, generateMasterKey, mergeEnvText, parseEnvText } from './env-text.mjs';
+import { ensureGithubSource } from './github-source.mjs';
+import { REDACTED } from './redaction.mjs';
 import { DeployStop, errorMessage } from './run-context.mjs';
 import { VaultKeyError, parseMasterKey } from '../../src/app/secrets/vault.js';
 
@@ -25,6 +29,11 @@ export const POLL_INTERVAL_MS = 5_000;
 export const CLOUDFLARED_WAIT_MS = 10 * 60_000;
 export const TUNNEL_HEALTH_WAIT_MS = 5 * 60_000;
 const LOG_TAIL_LINES = 120;
+// The GitHub provider clones with an installation token in the URL, which a failing clone can echo.
+const LOG_CREDENTIALS = Object.freeze([
+  [/(\/\/)[^\s/@]+@/g, `$1${REDACTED}@`],
+  [/\b(?:gh[opsur]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, REDACTED],
+]);
 // Deployment statuses: running → done | error | cancelled. Anything else is drift and stops the wait.
 const WAITING_STATUSES = new Set(['running', 'queued', 'pending']);
 const DESCRIPTION = 'Managed by scripts/deploy/dokploy-cloudflare.mjs';
@@ -119,9 +128,11 @@ export async function ensureProjectEnvironment(ctx) {
  * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
  * @param {DokployLocation} location
  * @param {{ authDomain: string, aud: string }} access
+ * @param {import('./github-source.mjs').GithubSource|null} [github] With `DOKPLOY_SOURCE=github`: the
+ *   provider and repository resolved by preflight.
  * @returns {Promise<{ applicationId: string, appName: string }>}
  */
-export async function ensureMainApplication(ctx, location, access) {
+export async function ensureMainApplication(ctx, location, access, github = null) {
   const { applicationId } = await ensureApplication(ctx, location, NAMES.app, location.apps.main);
   const app = await readApplication(ctx, applicationId, NAMES.app);
   const routes = publicRoutesOf(app);
@@ -131,7 +142,8 @@ export async function ensureMainApplication(ctx, location, access) {
   if (!app.pending) recordState(ctx, { app: { applicationId: app.applicationId, appName: app.appName } });
   ctx.report.info(`Service name of "${NAMES.app}" on dokploy-network: ${app.appName}`);
 
-  await ensureGitSource(ctx, app);
+  if (ctx.config.git.source === 'github') await ensureGithubSource(ctx, app, github);
+  else await ensureGitSource(ctx, app);
   await ensureDockerfileBuild(ctx, app);
   await ensureAppEnvironment(ctx, app, access);
   await ensureDataVolume(ctx, app);
@@ -281,6 +293,11 @@ export async function readApplication(ctx, applicationId, name) {
   const app = await ctx.dokploy.query('application.one', { applicationId });
   if (!app || typeof app !== 'object' || app.applicationId !== applicationId) {
     throw new DeployStop(`Dokploy application.one did not return application "${name}".`);
+  }
+  // Never printed, but registered so that no output can show them: the deploy webhook token and,
+  // for a GitHub-sourced application, the GitHub App credentials that come with it.
+  for (const secret of [app.refreshToken, app.github?.githubClientSecret, app.github?.githubWebhookSecret, app.github?.githubPrivateKey]) {
+    ctx.redactor.add(secret);
   }
   if (typeof app.appName !== 'string' || app.appName === '') {
     throw new DeployStop(`Dokploy application "${name}" has no appName (service name).`);
@@ -511,7 +528,7 @@ async function printDeploymentLog(ctx, deploymentId, label) {
           : JSON.stringify(raw);
     const lines = text.split(/\r?\n/).filter(line => line.trim() !== '').slice(-LOG_TAIL_LINES);
     ctx.report.fail(`Last ${lines.length} log lines of the ${label} deployment (redacted):`);
-    for (const line of lines) ctx.report.log(line);
+    for (const line of lines) ctx.report.log(LOG_CREDENTIALS.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), line));
   } catch (error) {
     ctx.report.warn(`Could not read the ${label} deployment log: ${errorMessage(error)}`);
   }
