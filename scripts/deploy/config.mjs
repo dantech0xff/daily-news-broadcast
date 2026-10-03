@@ -5,19 +5,17 @@
  *
  * Problems name variables and rules only, never values: secrets reach the
  * script through the environment and must never be echoed. Secret settings
- * are non-enumerable on the returned config so serializing it cannot leak
- * them.
+ * and the origin address are non-enumerable on the returned config so
+ * serializing it cannot leak them.
  */
 
-import { isIP } from 'node:net';
+import { isIPv4 } from 'node:net';
 
 /** Names the script looks resources up by on every run. */
 export const NAMES = Object.freeze({
   project: 'content-radar',
   environment: 'production',
   app: 'content-radar',
-  cloudflared: 'content-radar-cloudflared',
-  tunnel: 'content-radar',
   volume: 'content-radar-data',
   accessApp: 'Content Radar',
   allowPolicy: 'content-radar-users',
@@ -28,7 +26,6 @@ export const NAMES = Object.freeze({
 export const DEFAULTS = Object.freeze({
   gitUrl: 'https://github.com/dantech0xff/daily-news-broadcast.git',
   gitBranch: 'master',
-  cloudflaredImage: 'cloudflare/cloudflared:2026.9.3',
   waitMinutes: 30,
 });
 
@@ -57,8 +54,20 @@ export const SWARM_HEALTHCHECK = Object.freeze({
   StartPeriod: 30 * NANOSECONDS_PER_SECOND,
   Retries: 3,
 });
-/** cloudflared's entrypoint is `cloudflared --no-autoupdate`; these replace its default `version` command. */
-export const CLOUDFLARED_ARGS = Object.freeze(['tunnel', 'run']);
+/**
+ * The app's Dokploy domain (its Traefik route) for APP_HOSTNAME, besides the
+ * host itself. Cloudflare's proxy terminates the public TLS and connects to
+ * the VPS over HTTPS; Traefik answers with its default certificate there (a
+ * Cloudflare Origin CA certificate), so the domain asks for none.
+ */
+export const TRAEFIK_DOMAIN = Object.freeze({
+  path: '/',
+  port: APP_PORT,
+  https: true,
+  certificateType: 'none',
+  domainType: 'application',
+  stripPath: false,
+});
 
 /** Environment keys whose values are not secret and may be shown in a dry run. */
 export const PUBLIC_ENV_KEYS = Object.freeze(new Set([
@@ -79,15 +88,16 @@ export const SOURCES = Object.freeze(['git', 'github']);
 
 const DEPLOY_VARIABLES = Object.freeze([
   'DOKPLOY_URL', 'DOKPLOY_API_KEY', 'CF_API_TOKEN', 'CF_ACCOUNT_ID', 'CF_ZONE_ID',
-  'APP_HOSTNAME', 'APP_OPERATOR_EMAILS', 'CF_ACCESS_CLIENT_ID',
+  'APP_HOSTNAME', 'APP_OPERATOR_EMAILS', 'CF_ACCESS_CLIENT_ID', 'ORIGIN_IP',
 ]);
+// Verify reads the DNS record too; `--origin-ip` stands in for ORIGIN_IP.
 const VERIFY_VARIABLES = Object.freeze([
-  'DOKPLOY_URL', 'DOKPLOY_API_KEY', 'APP_HOSTNAME', 'CF_ACCESS_CLIENT_ID', 'CF_ACCESS_CLIENT_SECRET',
+  'DOKPLOY_URL', 'DOKPLOY_API_KEY', 'CF_API_TOKEN', 'CF_ZONE_ID', 'APP_HOSTNAME', 'CF_ACCESS_CLIENT_ID', 'CF_ACCESS_CLIENT_SECRET',
 ]);
 /** Flags each command accepts (besides --help). */
 const COMMAND_FLAGS = Object.freeze({
   preflight: Object.freeze([]),
-  deploy: Object.freeze(['dry-run', 'git-url', 'git-branch', 'cloudflared-image', 'wait-minutes']),
+  deploy: Object.freeze(['dry-run', 'git-url', 'git-branch', 'wait-minutes']),
   verify: Object.freeze(['redeploy-check', 'origin-ip', 'wait-minutes']),
 });
 
@@ -104,7 +114,6 @@ const GIT_BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
 const GITHUB_OWNER = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const GITHUB_REPOSITORY = /^[A-Za-z0-9._-]{1,100}$/;
 const PROVIDER_NAME = /^[^\x00-\x1f\x7f]{1,200}$/;
-const IMAGE_REFERENCE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::([A-Za-z0-9_][A-Za-z0-9._-]{0,127}))?(@sha256:[a-f0-9]{64})?$/;
 
 /**
  * @typedef {object} DeployConfig
@@ -114,7 +123,10 @@ const IMAGE_REFERENCE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z
  * @property {{ url: string, apiKey: string, behindAccess: boolean }} dokploy `apiKey` is non-enumerable;
  *   `behindAccess` (from `DOKPLOY_BEHIND_ACCESS`) sends the Access service-token headers to the Dokploy API.
  * @property {{ apiToken: string, accountId: string, zoneId: string }} cloudflare `apiToken` is non-enumerable.
- * @property {string} hostname Lowercase FQDN served through the tunnel.
+ * @property {string} hostname Lowercase FQDN: Cloudflare Access in front, Traefik on the VPS behind.
+ * @property {string} originIp IPv4 address of the VPS (`ORIGIN_IP`; for verify, `--origin-ip` wins):
+ *   the content of the hostname's proxied A record and the address the origin checks probe.
+ *   Non-enumerable, and never printed.
  * @property {string[]} operatorEmails Lowercase, unique.
  * @property {string[]} viewerEmails Lowercase, unique.
  * @property {{ clientId: string, clientSecret: string }} serviceToken `clientSecret` is non-enumerable.
@@ -124,9 +136,7 @@ const IMAGE_REFERENCE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z
  * }} git `source` is `DOKPLOY_SOURCE` (see `SOURCES`). With `github`: `githubProvider` is
  *   `DOKPLOY_GITHUB_PROVIDER` (`null`: use the only provider), and `owner`/`repository` are read
  *   from the GitHub `url`; all three are `null` with `git`.
- * @property {string} cloudflaredImage Pinned image reference.
  * @property {number} waitMs How long to wait for one Dokploy build/deployment.
- * @property {string|null} originIp `--origin-ip` override for the origin probe.
  */
 
 /**
@@ -151,7 +161,10 @@ export function readDeployConfig(env, { command, flags = {} }) {
     const value = env?.[name];
     return value === undefined || value === null ? '' : String(value).trim();
   };
-  const required = command === 'verify' ? VERIFY_VARIABLES : DEPLOY_VARIABLES;
+  // Only verify takes --origin-ip (any other command already reported it above).
+  const originIpFlag = command === 'verify' ? stringFlag(flags['origin-ip']) : undefined;
+  const required = command !== 'verify' ? DEPLOY_VARIABLES
+    : [...VERIFY_VARIABLES, ...(originIpFlag === undefined ? ['ORIGIN_IP'] : [])];
   const missing = required.filter(name => read(name) === '');
   if (missing.length > 0) problems.push(`Missing environment variables: ${missing.join(', ')}.`);
   const dokployBehindAccess = readBooleanFlag(read('DOKPLOY_BEHIND_ACCESS'), 'DOKPLOY_BEHIND_ACCESS', problems);
@@ -178,6 +191,7 @@ export function readDeployConfig(env, { command, flags = {} }) {
   const accountId = readCloudflareId(read('CF_ACCOUNT_ID'), 'CF_ACCOUNT_ID', problems);
   const zoneId = readCloudflareId(read('CF_ZONE_ID'), 'CF_ZONE_ID', problems);
   const hostname = read('APP_HOSTNAME') ? readHostname(read('APP_HOSTNAME'), problems) : '';
+  const originIp = readOriginIp(originIpFlag, read('ORIGIN_IP'), problems);
   const operatorEmails = readEmails(read('APP_OPERATOR_EMAILS'), 'APP_OPERATOR_EMAILS', problems);
   const viewerEmails = readEmails(read('APP_VIEWER_EMAILS'), 'APP_VIEWER_EMAILS', problems);
   const clientId = read('CF_ACCESS_CLIENT_ID');
@@ -194,14 +208,7 @@ export function readDeployConfig(env, { command, flags = {} }) {
   if (!GIT_BRANCH.test(gitBranch) || gitBranch.includes('..') || gitBranch.startsWith('/') || gitBranch.endsWith('/')) {
     problems.push('--git-branch must be a branch name such as master or feat/my-change.');
   }
-  const cloudflaredImage = stringFlag(flags['cloudflared-image']) ?? DEFAULTS.cloudflaredImage;
-  const imageMatch = IMAGE_REFERENCE.exec(cloudflaredImage);
-  if (!imageMatch || (!imageMatch[2] && (!imageMatch[1] || imageMatch[1] === 'latest'))) {
-    problems.push('--cloudflared-image must be a pinned image reference with a version tag (not latest) or a sha256 digest, for example cloudflare/cloudflared:2026.9.3.');
-  }
   const waitMinutes = readWaitMinutes(stringFlag(flags['wait-minutes']), problems);
-  const originIp = stringFlag(flags['origin-ip']) ?? null;
-  if (originIp !== null && isIP(originIp) === 0) problems.push('--origin-ip must be an IPv4 or IPv6 address.');
 
   if (problems.length > 0) return { config: null, problems, warnings };
 
@@ -223,10 +230,9 @@ export function readDeployConfig(env, { command, flags = {} }) {
       owner: githubRepository?.owner ?? null,
       repository: githubRepository?.repository ?? null,
     },
-    cloudflaredImage,
     waitMs: waitMinutes * 60_000,
-    originIp,
   };
+  Object.defineProperty(config, 'originIp', { value: originIp, enumerable: false });
   Object.defineProperty(config.dokploy, 'apiKey', { value: dokployApiKey, enumerable: false });
   Object.defineProperty(config.cloudflare, 'apiToken', { value: cfApiToken, enumerable: false });
   Object.defineProperty(config.serviceToken, 'clientSecret', { value: clientSecret, enumerable: false });
@@ -341,6 +347,18 @@ function readHostname(value, problems) {
     return '';
   }
   return hostname;
+}
+
+// The hostname's A record needs an IPv4 address; for verify, `--origin-ip` wins over ORIGIN_IP.
+function readOriginIp(flag, value, problems) {
+  if (flag !== undefined) {
+    if (!isIPv4(flag)) problems.push('--origin-ip must be the IPv4 address of the VPS.');
+    return flag;
+  }
+  if (value && !isIPv4(value)) {
+    problems.push('ORIGIN_IP must be the IPv4 address of the VPS that the hostname\'s proxied A record points to.');
+  }
+  return value;
 }
 
 function readEmails(value, name, problems) {

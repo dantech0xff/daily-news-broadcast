@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Deploy Content Radar to Dokploy behind Cloudflare Tunnel + Access, using
- * the Dokploy and Cloudflare APIs only.
+ * Deploy Content Radar to Dokploy behind Cloudflare Access, served by
+ * Dokploy's Traefik on the VPS, using the Dokploy and Cloudflare APIs only.
  *
  *   npm run deploy:preflight                      read-only checks; exit 1 on any blocker
  *   npm run deploy:dokploy                        preflight, then the idempotent deploy
@@ -9,13 +9,13 @@
  *   npm run deploy:verify [-- --redeploy-check]   acceptance checks of the live deployment
  *
  * Settings come from the shell or `.env`. Secret values (API keys, the
- * service token secret, the app master key, the tunnel token) are never
- * printed or written to disk: every output line is redacted, and the only
- * file written is `.cache/deploy/state.json` with resource IDs.
+ * service token secret, the app master key) and the origin address
+ * (ORIGIN_IP) are never printed or written to disk: every output line is
+ * redacted, and the only file written is `.cache/deploy/state.json` with
+ * resource IDs.
  */
 
 import { randomBytes } from 'node:crypto';
-import { lookup as dnsLookup } from 'node:dns/promises';
 import { relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -25,21 +25,22 @@ import { runDeploy } from './deploy.mjs';
 import { runPreflight } from './preflight.mjs';
 import { Redactor } from './redaction.mjs';
 import { DEFAULT_STATE_DIR, createReporter, createRunContext, errorMessage, writeStateFile } from './run-context.mjs';
-import { probeOriginHttp, runVerify } from './verify.mjs';
+import { probeOriginHttps, runVerify } from './verify.mjs';
 
 const SECRET_VARIABLES = Object.freeze(['DOKPLOY_API_KEY', 'CF_API_TOKEN', 'CF_ACCESS_CLIENT_SECRET']);
 
 export const USAGE = `Usage: node scripts/deploy/dokploy-cloudflare.mjs <preflight|deploy|verify> [options]
 
 Commands:
-  preflight  Read-only checks: Dokploy version and API surface (OpenAPI), Cloudflare
-             token, Zero Trust organization, zone, service token, tunnel, DNS; with
-             DOKPLOY_SOURCE=github also the GitHub provider, the repository, and the
-             Access bypass for GitHub's push webhooks.
+  preflight  Read-only checks: Dokploy version and API surface (OpenAPI), the app's
+             Traefik domain and ports, Cloudflare token, Zero Trust organization, zone,
+             service token, DNS; with DOKPLOY_SOURCE=github also the GitHub provider,
+             the repository, and the Access bypass for GitHub's push webhooks.
   deploy     Preflight, then the idempotent deploy in this order: Access -> Dokploy
-             app (deployed) -> tunnel ingress + cloudflared -> DNS.
+             app (deployed) -> its Traefik domain -> DNS (proxied A record to ORIGIN_IP).
   verify     Checks of the live deployment: Access in front, the service token works,
-             the origin is closed.
+             the origin (HTTPS to ORIGIN_IP) serves no app data without an Access JWT,
+             DNS, and the Dokploy domain, ports, and Swarm settings.
 
 Options:
   deploy   --dry-run                  List the changes in order; read-only API calls only.
@@ -48,17 +49,18 @@ Options:
                                       is merged, pass --git-branch master on every run: with
                                       DOKPLOY_SOURCE=github each push to master then deploys,
                                       and a run without the flag tracks the default again.
-           --cloudflared-image <ref>  Default ${DEFAULTS.cloudflaredImage} (must be pinned)
            --wait-minutes <n>         How long to wait for a build (default ${DEFAULTS.waitMinutes}).
   verify   --redeploy-check           Also redeploy the app and confirm the data survives.
-           --origin-ip <ip>           Server IP for the origin probe (default: DOKPLOY_URL's host).
+           --origin-ip <ipv4>         VPS address for the origin and DNS checks (default: ORIGIN_IP).
            --wait-minutes <n>         How long to wait for the redeploy.
   -h, --help
 
 Environment (shell or .env; values are never printed):
-  DOKPLOY_URL, DOKPLOY_API_KEY, CF_API_TOKEN, CF_ACCOUNT_ID, CF_ZONE_ID, APP_HOSTNAME,
-  APP_OPERATOR_EMAILS, APP_VIEWER_EMAILS (optional), CF_ACCESS_CLIENT_ID,
-  CF_ACCESS_CLIENT_SECRET (verify; every command with DOKPLOY_BEHIND_ACCESS=true).
+  DOKPLOY_URL, DOKPLOY_API_KEY, CF_API_TOKEN, CF_ACCOUNT_ID (not verify), CF_ZONE_ID,
+  APP_HOSTNAME, APP_OPERATOR_EMAILS (not verify), APP_VIEWER_EMAILS (optional),
+  ORIGIN_IP (the VPS IPv4 address the hostname's proxied A record points to),
+  CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET (verify; every command with
+  DOKPLOY_BEHIND_ACCESS=true).
   Optional:
   DOKPLOY_BEHIND_ACCESS=true      The Dokploy panel is behind Cloudflare Access; its API
                                   gets the CF_ACCESS_CLIENT_ID service token as well.
@@ -109,6 +111,7 @@ export async function main(argv, deps = {}) {
     for (const problem of problems) report.blocker(problem);
     return 2;
   }
+  redactor.maskAddress(config.originIp);
 
   const ctx = createRunContext({
     config,
@@ -118,8 +121,7 @@ export async function main(argv, deps = {}) {
       fetch: deps.fetch ?? globalThis.fetch,
       sleep: deps.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms))),
       now: deps.now ?? (() => Date.now()),
-      lookup: deps.lookup ?? (async hostname => (await dnsLookup(hostname)).address),
-      probeOrigin: deps.probeOrigin ?? probeOriginHttp,
+      probeOrigin: deps.probeOrigin ?? probeOriginHttps,
       randomBytes: deps.randomBytes ?? randomBytes,
       stateDir: deps.stateDir === undefined ? DEFAULT_STATE_DIR : deps.stateDir,
     },
@@ -156,7 +158,7 @@ async function commandDeploy(ctx) {
     if (ctx.dryRun) {
       ctx.report.line(`${ctx.planner.calls.length} change(s) planned; nothing was sent.`);
     } else {
-      ctx.report.line(`Done: https://${ctx.config.hostname} → tunnel ${outcome.tunnelId} → ${outcome.appName}:3000 (every channel stays paused).`);
+      ctx.report.line(`Done: https://${ctx.config.hostname} → Cloudflare Access → Traefik on the VPS → ${outcome.appName}:3000 (channels keep their paused or active state).`);
       ctx.report.line('Next: npm run deploy:verify');
     }
     return 0;
@@ -198,7 +200,6 @@ function parseCli(argv) {
       'redeploy-check': { type: 'boolean' },
       'git-url': { type: 'string' },
       'git-branch': { type: 'string' },
-      'cloudflared-image': { type: 'string' },
       'origin-ip': { type: 'string' },
       'wait-minutes': { type: 'string' },
       help: { type: 'boolean', short: 'h' },

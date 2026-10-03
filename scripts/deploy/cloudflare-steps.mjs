@@ -5,18 +5,19 @@
  *   service token), and the self-hosted Access application whose `aud` the
  *   app verifies. Access exists before DNS, so the hostname is never served
  *   unprotected.
- * - Tunnel: a remotely managed tunnel whose ingress points straight at the
- *   app's service on `dokploy-network` and makes cloudflared require a valid
- *   Access token as well.
- * - DNS, last: a proxied CNAME to the tunnel. An existing record that points
- *   anywhere else is never overwritten.
+ * - DNS, last: the hostname as a proxied A record to the VPS (ORIGIN_IP),
+ *   where Dokploy's Traefik routes it to the app. An existing record for the
+ *   hostname is updated in place (same record id), whatever it pointed to.
  */
 
-import { ApiError, isDryRun } from './api-clients.mjs';
-import { APP_PORT, NAMES } from './config.mjs';
+import { isDryRun } from './api-clients.mjs';
+import { NAMES } from './config.mjs';
+import { ORIGIN_MASK } from './redaction.mjs';
 import { DeployStop } from './run-context.mjs';
 
-const TUNNEL_DOMAIN = 'cfargotunnel.com';
+/** Comment on the DNS record, so the dashboard says what owns it. */
+export const DNS_COMMENT = 'Content Radar on Dokploy Traefik (scripts/deploy/dokploy-cloudflare.mjs)';
+const ADDRESS_TYPES = new Set(['A', 'AAAA']);
 
 /**
  * Access applications that protect exactly `APP_HOSTNAME`.
@@ -27,17 +28,6 @@ export async function findAccessApps(ctx) {
   const { accountId } = ctx.config.cloudflare;
   const apps = await ctx.cloudflare.list(`/accounts/${accountId}/access/apps`, { domain: ctx.config.hostname });
   return apps.filter(app => coversHostname(app, ctx.config.hostname));
-}
-
-/**
- * Tunnels named `content-radar` that are not deleted.
- * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
- * @returns {Promise<any[]>}
- */
-export async function findTunnels(ctx) {
-  const { accountId } = ctx.config.cloudflare;
-  const tunnels = await ctx.cloudflare.list(`/accounts/${accountId}/cfd_tunnel`, { name: NAMES.tunnel, is_deleted: false });
-  return tunnels.filter(tunnel => tunnel?.name === NAMES.tunnel && !tunnel.deleted_at);
 }
 
 /**
@@ -52,37 +42,28 @@ export async function findDnsRecords(ctx) {
 }
 
 /**
- * @param {any} tunnel
- * @returns {boolean} True when the tunnel's configuration is managed through the API.
- */
-export function isRemotelyManaged(tunnel) {
-  return tunnel?.remote_config === true || tunnel?.config_src === 'cloudflare';
-}
-
-/**
- * @param {string} tunnelId
- * @returns {string}
- */
-export function tunnelTarget(tunnelId) {
-  return `${tunnelId}.${TUNNEL_DOMAIN}`;
-}
-
-/**
  * @param {any} record
- * @param {string} target
- * @returns {boolean}
+ * @param {string} originIp
+ * @returns {boolean} True for the record the hostname needs: a proxied A record to the origin.
  */
-export function isCnameTo(record, target) {
-  return record?.type === 'CNAME' && sameHost(record.content, target);
+export function isOriginRecord(record, originIp) {
+  return record?.type === 'A' && record.content === originIp && record.proxied === true;
 }
 
 /**
- * Short, non-secret description of DNS records for messages.
+ * Short description of DNS records for messages. Addresses are never shown:
+ * the origin appears as `ORIGIN_MASK`, any other address as `<other address>`.
  * @param {any[]} records
+ * @param {string} originIp
  * @returns {string}
  */
-export function describeDnsRecords(records) {
-  return records.map(record => `${record?.type ?? '?'} ${record?.content ?? '?'}${record?.proxied ? ' (proxied)' : ''}`).join(', ');
+export function describeDnsRecords(records, originIp) {
+  return records.map(record => {
+    const type = record?.type ?? '?';
+    const target = !ADDRESS_TYPES.has(type) ? (record?.content ?? '?')
+      : record.content === originIp ? ORIGIN_MASK : '<other address>';
+    return `${type} ${target}${record?.proxied ? ' (proxied)' : ''}`;
+  }).join(', ');
 }
 
 /**
@@ -210,136 +191,33 @@ async function ensureAccessApp(ctx, policyIds) {
 }
 
 /**
- * Find the `content-radar` tunnel or create a remotely managed one.
+ * The proxied A record to the origin, created last. A record of another type
+ * (such as an earlier CNAME), address, or proxy setting is updated in place;
+ * several records for the hostname stop the deploy, which never deletes one.
  * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
- * @returns {Promise<{ id: string, created: boolean, pending?: boolean }>}
+ * @returns {Promise<any>} The record, or `null` when its creation is only planned.
  */
-export async function ensureTunnel(ctx) {
-  const { accountId } = ctx.config.cloudflare;
-  const tunnels = await findTunnels(ctx);
-  if (tunnels.length > 1) {
-    throw new DeployStop(`Cloudflare has ${tunnels.length} tunnels named "${NAMES.tunnel}"; delete the extra ones, then re-run.`);
-  }
-  if (tunnels.length === 1) {
-    const [tunnel] = tunnels;
-    if (!isRemotelyManaged(tunnel)) {
-      throw new DeployStop(`Tunnel "${NAMES.tunnel}" is managed by a local config file; the deploy sets ingress through the API. Migrate it to dashboard management or delete it, then re-run.`);
-    }
-    ctx.report.ok(`Tunnel "${NAMES.tunnel}" exists (id ${tunnel.id}, status ${tunnel.status ?? 'unknown'}).`);
-    return { id: tunnel.id, created: false };
-  }
-  ctx.change('create', `Cloudflare Tunnel "${NAMES.tunnel}" (config_src: cloudflare)`);
-  const created = await ctx.cloudflare.post(`/accounts/${accountId}/cfd_tunnel`, { name: NAMES.tunnel, config_src: 'cloudflare' });
-  if (isDryRun(created)) return { id: '<new-tunnel-id>', created: true, pending: true };
-  if (typeof created?.token === 'string') ctx.redactor.add(created.token);
-  if (typeof created?.id !== 'string' || created.id === '') throw new DeployStop('Creating the tunnel returned no tunnel id.');
-  return { id: created.id, created: true };
-}
-
-/**
- * Ingress: `APP_HOSTNAME` → the app's service on `dokploy-network`, with
- * cloudflared also requiring a valid Access token; everything else 404.
- * @param {{ hostname: string, appName: string, teamName: string, aud: string }} values
- * @returns {object[]}
- */
-export function desiredIngress({ hostname, appName, teamName, aud }) {
-  return [
-    {
-      hostname,
-      service: `http://${appName}:${APP_PORT}`,
-      originRequest: { access: { required: true, teamName, audTag: [aud] } },
-    },
-    { service: 'http_status:404' },
-  ];
-}
-
-/**
- * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
- * @param {{ id: string, pending?: boolean }} tunnel
- * @param {{ appName: string, teamName: string, aud: string }} values
- */
-export async function ensureTunnelIngress(ctx, tunnel, { appName, teamName, aud }) {
-  const { accountId } = ctx.config.cloudflare;
-  const path = `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`;
-  const ingress = desiredIngress({ hostname: ctx.config.hostname, appName, teamName, aud });
-  let config = {};
-  if (!tunnel.pending) {
-    try {
-      const current = await ctx.cloudflare.get(path);
-      if (current?.config && typeof current.config === 'object') config = current.config;
-    } catch (error) {
-      if (!(error instanceof ApiError && error.status === 404)) throw error;
-    }
-  }
-  if (sameIngress(config.ingress, ingress)) {
-    ctx.report.ok(`Tunnel ingress routes ${ctx.config.hostname} to http://${appName}:${APP_PORT} with Access required.`);
-    return;
-  }
-  ctx.change('update', `Tunnel ingress: ${ctx.config.hostname} → http://${appName}:${APP_PORT} (Access token required), everything else 404`);
-  await ctx.cloudflare.put(path, { config: { ...config, ingress } });
-}
-
-/**
- * The tunnel token, registered with the redactor. Never printed or stored.
- * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
- * @param {string} tunnelId
- * @returns {Promise<string>}
- */
-export async function fetchTunnelToken(ctx, tunnelId) {
-  const { accountId } = ctx.config.cloudflare;
-  const token = await ctx.cloudflare.get(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`);
-  if (typeof token !== 'string' || token.length < 20) throw new DeployStop('The tunnel token API returned no token.');
-  return ctx.redactor.add(token);
-}
-
-/**
- * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
- * @param {string} tunnelId
- * @returns {Promise<{ status: string, connections: number }>}
- */
-export async function readTunnelStatus(ctx, tunnelId) {
-  const { accountId } = ctx.config.cloudflare;
-  const tunnel = await ctx.cloudflare.get(`/accounts/${accountId}/cfd_tunnel/${tunnelId}`);
-  return {
-    status: typeof tunnel?.status === 'string' ? tunnel.status : 'unknown',
-    connections: Array.isArray(tunnel?.connections) ? tunnel.connections.length : 0,
-  };
-}
-
-/**
- * The proxied CNAME, created last. Stops instead of touching a record that
- * points anywhere else.
- * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
- * @param {{ id: string }} tunnel
- * @returns {Promise<any>}
- */
-export async function ensureDnsRecord(ctx, tunnel) {
+export async function ensureDnsRecord(ctx) {
   const { zoneId } = ctx.config.cloudflare;
-  const hostname = ctx.config.hostname;
-  const target = tunnelTarget(tunnel.id);
+  const { hostname, originIp } = ctx.config;
+  const desired = { type: 'A', name: hostname, content: originIp, proxied: true, ttl: 1, comment: DNS_COMMENT };
   const records = await findDnsRecords(ctx);
+  if (records.length > 1) {
+    throw new DeployStop(`DNS has ${records.length} records for ${hostname} (${describeDnsRecords(records, originIp)}). The deploy updates one record in place and never deletes any: remove the extra ones, then re-run.`);
+  }
   if (records.length === 0) {
-    ctx.change('create', `DNS: proxied CNAME ${hostname} → ${target}`);
-    const created = await ctx.cloudflare.post(`/zones/${zoneId}/dns_records`, {
-      type: 'CNAME',
-      name: hostname,
-      content: target,
-      proxied: true,
-      ttl: 1,
-      comment: 'Content Radar tunnel (scripts/deploy/dokploy-cloudflare.mjs)',
-    });
+    ctx.change('create', `DNS: proxied A record ${hostname} → ${ORIGIN_MASK} (ORIGIN_IP)`);
+    const created = await ctx.cloudflare.post(`/zones/${zoneId}/dns_records`, desired);
     return isDryRun(created) ? null : created;
   }
-  if (records.length === 1 && isCnameTo(records[0], target)) {
-    if (records[0].proxied === true) {
-      ctx.report.ok(`DNS: ${hostname} is a proxied CNAME to the tunnel.`);
-      return records[0];
-    }
-    ctx.change('update', `DNS: turn on the Cloudflare proxy for the tunnel CNAME of ${hostname}`);
-    const updated = await ctx.cloudflare.patch(`/zones/${zoneId}/dns_records/${records[0].id}`, { proxied: true });
-    return isDryRun(updated) ? records[0] : updated;
+  const [record] = records;
+  if (isOriginRecord(record, originIp)) {
+    ctx.report.ok(`DNS: ${hostname} is a proxied A record to ${ORIGIN_MASK}.`);
+    return record;
   }
-  throw new DeployStop(`DNS already has ${describeDnsRecords(records)} for ${hostname}, which does not point to the content-radar tunnel (${target}). The deploy never overwrites DNS records: delete it or choose another APP_HOSTNAME, then re-run.`);
+  ctx.change('update', `DNS: ${hostname} ${describeDnsRecords([record], originIp)} → proxied A record to ${ORIGIN_MASK} (ORIGIN_IP), same record`);
+  const updated = await ctx.cloudflare.put(`/zones/${zoneId}/dns_records/${record.id}`, desired);
+  return isDryRun(updated) ? record : updated;
 }
 
 function coversHostname(app, hostname) {
@@ -371,22 +249,6 @@ function sameRules(current, desired) {
 
 function hasRules(rules) {
   return Array.isArray(rules) && rules.length > 0;
-}
-
-function sameIngress(current, desired) {
-  if (!Array.isArray(current) || current.length !== desired.length) return false;
-  return desired.every((rule, index) => {
-    const actual = current[index];
-    const access = actual?.originRequest?.access;
-    const wanted = rule.originRequest?.access;
-    if ((actual?.hostname ?? null) !== (rule.hostname ?? null) || actual?.service !== rule.service) return false;
-    if (!wanted) return !access?.required;
-    return access?.required === true
-      && access.teamName === wanted.teamName
-      && Array.isArray(access.audTag)
-      && access.audTag.length === wanted.audTag.length
-      && wanted.audTag.every(tag => access.audTag.includes(tag));
-  });
 }
 
 function requireId(value, what) {

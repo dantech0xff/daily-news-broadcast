@@ -19,7 +19,6 @@ export const FAKE = Object.freeze({
   serviceTokenId: '5b0e4c3a-0000-4000-8000-000000000001',
   clientId: '7f3c9a1b2d4e.access',
   clientSecret: 'cf-access-client-secret-SECRET-0003',
-  tunnelToken: 'eyJhIjoiZmFrZS1hY2NvdW50IiwidCI6ImZha2UtdHVubmVsIiwicyI6IlNFQ1JFVC0wMDA0In0=',
   operatorEmail: 'ops@example.test',
   viewerEmail: 'viewer@example.test',
   originIp: '203.0.113.10',
@@ -36,9 +35,22 @@ export const FAKE = Object.freeze({
 
 /** Every secret value the script must never print or write. */
 export const FAKE_SECRETS = Object.freeze([
-  FAKE.dokployApiKey, FAKE.cfApiToken, FAKE.clientSecret, FAKE.tunnelToken,
+  FAKE.dokployApiKey, FAKE.cfApiToken, FAKE.clientSecret,
   FAKE.githubPrivateKey, FAKE.githubWebhookSecret, FAKE.githubClientSecret, FAKE.refreshToken,
 ]);
+
+/** The app's 401 for a request without an Access JWT (src/app/api/errors.js). */
+export const APP_401_JSON = JSON.stringify({ error: 'unauthenticated', message: 'Cần đăng nhập qua Cloudflare Access.' });
+
+/**
+ * True when `text` shows the origin address: as is, or dashed as in generated
+ * hostnames. The script prints `<origin-ip>` instead.
+ * @param {string} text
+ * @param {string} [address]
+ */
+export function showsAddress(text, address = FAKE.originIp) {
+  return text.includes(address) || text.includes(address.replaceAll('.', '-'));
+}
 
 /**
  * @param {Record<string, string|undefined>} [overrides]
@@ -56,6 +68,7 @@ export function deployEnv(overrides = {}) {
     APP_VIEWER_EMAILS: FAKE.viewerEmail,
     CF_ACCESS_CLIENT_ID: FAKE.clientId,
     CF_ACCESS_CLIENT_SECRET: FAKE.clientSecret,
+    ORIGIN_IP: FAKE.originIp,
     ...overrides,
   };
 }
@@ -83,6 +96,12 @@ export function dokployOpenApi({ omit = [], require = {}, removeFields = {}, sto
   });
   const health = { Test: { type: 'array', items: text }, Interval: number, Timeout: number, Retries: number };
   if (startPeriod) health.StartPeriod = number;
+  const domainFields = {
+    host: { type: 'string', minLength: 1 }, path: nullableText, port: { type: 'number', nullable: true }, https: { type: 'boolean' },
+    certificateType: { type: 'string', enum: ['letsencrypt', 'none', 'custom'] }, customCertResolver: nullableText, serviceName: nullableText,
+    domainType: { type: 'string', enum: ['compose', 'application', 'preview'], nullable: true }, internalPath: nullableText,
+    stripPath: { type: 'boolean' },
+  };
   const paths = {
     '/settings.getDokployVersion': get([]),
     '/settings.getOpenApiDocument': get([]),
@@ -106,9 +125,6 @@ export function dokployOpenApi({ omit = [], require = {}, removeFields = {}, sto
       dockerfile: nullableText, dockerContextPath: nullableText, dockerBuildStage: nullableText, herokuVersion: nullableText,
       railpackVersion: nullableText, publishDirectory: nullableText, isStaticSpa: { type: 'boolean' },
     }, ['applicationId', 'buildType', 'dockerfile', 'dockerContextPath', 'dockerBuildStage', 'herokuVersion', 'railpackVersion']),
-    '/application.saveDockerProvider': post({
-      applicationId: id, dockerImage: nullableText, username: nullableText, password: nullableText, registryUrl: nullableText,
-    }, ['applicationId', 'dockerImage', 'username', 'password', 'registryUrl']),
     '/application.saveEnvironment': post({
       applicationId: id, env: nullableText, buildArgs: nullableText, buildSecrets: nullableText, createEnvFile: { type: 'boolean' },
     }, ['applicationId', 'env', 'buildArgs', 'buildSecrets', 'createEnvFile']),
@@ -117,6 +133,9 @@ export function dokployOpenApi({ omit = [], require = {}, removeFields = {}, sto
       mountPath: text, serviceType: { type: 'string', enum: ['application', 'postgres', 'mysql', 'mariadb', 'mongo', 'redis', 'compose'] },
       filePath: nullableText, serviceId: text,
     }, ['type', 'mountPath', 'serviceId']),
+    '/domain.byApplicationId': get([['applicationId', true]]),
+    '/domain.create': post({ ...domainFields, applicationId: nullableText, composeId: nullableText }, ['host']),
+    '/domain.update': post({ ...domainFields, enabled: { type: 'boolean' }, domainId: text }, ['host', 'domainId']),
     '/application.update': post({
       applicationId: id, name: text, replicas: number, command: nullableText, args: { type: 'array', items: text, nullable: true },
       updateConfigSwarm: {
@@ -191,8 +210,6 @@ export function createFakePlatform(options = {}) {
     accessApps: [],
     zone: { id: FAKE.zoneId, name: FAKE.zoneName, status: 'active', account: { id: FAKE.accountId } },
     dnsRecords: options.dnsRecords ?? [],
-    tunnels: [],
-    tunnelConfigs: new Map(),
   };
   const app = { channelCreatedAt: FAKE.channelCreatedAt, leaseHolderId: 'a1b2c3d4' };
   const calls = [];
@@ -295,8 +312,6 @@ export function createFakePlatform(options = {}) {
         return update(body.applicationId, {
           buildType: body.buildType, dockerfile: body.dockerfile, dockerContextPath: body.dockerContextPath, dockerBuildStage: body.dockerBuildStage,
         });
-      case 'POST application.saveDockerProvider':
-        return update(body.applicationId, { sourceType: 'docker', dockerImage: body.dockerImage, username: body.username, password: body.password });
       case 'POST application.saveEnvironment':
         return update(body.applicationId, { env: body.env, buildArgs: body.buildArgs, buildSecrets: body.buildSecrets, createEnvFile: body.createEnvFile });
       case 'POST mounts.create': {
@@ -304,6 +319,24 @@ export function createFakePlatform(options = {}) {
         if (!found) return json(404, { message: 'Application not found', code: 'NOT_FOUND' });
         found.mounts.push({ mountId: nextId('mount'), type: body.type, volumeName: body.volumeName, mountPath: body.mountPath, serviceType: body.serviceType });
         return json(200, true);
+      }
+      case 'GET domain.byApplicationId': {
+        const found = application(query.applicationId);
+        if (!found) return json(404, { message: 'Application not found', code: 'NOT_FOUND' });
+        return json(200, structuredClone(found.domains));
+      }
+      case 'POST domain.create': {
+        const found = application(body.applicationId);
+        if (!found) return json(404, { message: 'Application not found', code: 'NOT_FOUND' });
+        const domain = appDomain({ domainId: nextId('domain'), ...body });
+        found.domains.push(domain);
+        return json(200, structuredClone(domain));
+      }
+      case 'POST domain.update': {
+        const domain = [...dokploy.applications.values()].flatMap(entry => entry.domains).find(entry => entry.domainId === body.domainId);
+        if (!domain) return json(404, { message: 'Domain not found', code: 'NOT_FOUND' });
+        Object.assign(domain, body);
+        return json(200, structuredClone(domain));
       }
       case 'POST application.update': {
         const { applicationId, ...fields } = body;
@@ -322,7 +355,6 @@ export function createFakePlatform(options = {}) {
           status: 'running',
           kind: target,
           createdAt: new Date().toISOString(),
-          snapshot: structuredClone({ env: found.env, args: found.args, dockerImage: found.dockerImage, updateConfigSwarm: found.updateConfigSwarm }),
         });
         return json(200, true);
       }
@@ -336,7 +368,7 @@ export function createFakePlatform(options = {}) {
             if (deployment.status === 'done' && owner?.name === 'content-radar') app.leaseHolderId = nextId('holder');
           }
         }
-        return json(200, list.map(({ snapshot, kind, ...view }) => view));
+        return json(200, list.map(({ kind, ...view }) => view));
       }
       case 'GET deployment.readLogs':
         return json(200, dokploy.deploymentLog);
@@ -406,37 +438,12 @@ export function createFakePlatform(options = {}) {
       return ok(cloudflare.dnsRecords.filter(record => !query.name || record.name === query.name));
     }
     if (route === `POST /zones/${FAKE.zoneId}/dns_records`) return ok(push(cloudflare.dnsRecords, { id: nextId('dns'), ...body }));
-    if ((match = new RegExp(`^/zones/${FAKE.zoneId}/dns_records/([^/]+)$`).exec(target)) && method === 'PATCH') {
-      const record = cloudflare.dnsRecords.find(entry => entry.id === match[1]);
-      if (!record) return cloudflareError(404, 81044, 'Record does not exist.');
-      Object.assign(record, body);
-      return ok(record);
-    }
-    if (route === `GET ${account}/cfd_tunnel`) {
-      return ok(cloudflare.tunnels.filter(tunnel => (!query.name || tunnel.name === query.name) && (query.is_deleted !== 'false' || !tunnel.deleted_at)).map(tunnelView));
-    }
-    if (route === `POST ${account}/cfd_tunnel`) {
-      const tunnel = push(cloudflare.tunnels, {
-        id: `c0ffee00-0000-4000-8000-${String(++counter).padStart(12, '0')}`,
-        name: body.name,
-        config_src: body.config_src ?? 'local',
-        remote_config: body.config_src === 'cloudflare',
-        deleted_at: null,
-      });
-      return ok({ ...tunnelView(tunnel), token: FAKE.tunnelToken });
-    }
-    if ((match = new RegExp(`^${account}/cfd_tunnel/([^/]+)(/configurations|/token)?$`).exec(target))) {
-      const tunnel = cloudflare.tunnels.find(entry => entry.id === match[1]);
-      if (!tunnel) return cloudflareError(404, 1003, 'Tunnel not found');
-      if (!match[2] && method === 'GET') return ok(tunnelView(tunnel));
-      if (match[2] === '/token' && method === 'GET') return ok(FAKE.tunnelToken);
-      if (match[2] === '/configurations' && method === 'GET') {
-        return ok({ tunnel_id: tunnel.id, version: 0, config: cloudflare.tunnelConfigs.get(tunnel.id) ?? null, source: 'cloudflare' });
-      }
-      if (match[2] === '/configurations' && method === 'PUT') {
-        cloudflare.tunnelConfigs.set(tunnel.id, structuredClone(body.config));
-        return ok({ tunnel_id: tunnel.id, version: 1, config: body.config, source: 'cloudflare' });
-      }
+    // PUT overwrites the record (its type too) and keeps its id.
+    if ((match = new RegExp(`^/zones/${FAKE.zoneId}/dns_records/([^/]+)$`).exec(target)) && method === 'PUT') {
+      const index = cloudflare.dnsRecords.findIndex(entry => entry.id === match[1]);
+      if (index === -1) return cloudflareError(404, 81044, 'Record does not exist.');
+      cloudflare.dnsRecords[index] = { id: match[1], ...body };
+      return ok(cloudflare.dnsRecords[index]);
     }
     return cloudflareError(404, 7003, `No route for ${route}`);
   }
@@ -448,25 +455,36 @@ export function createFakePlatform(options = {}) {
     });
   }
 
-  // The tunnel is healthy once a finished cloudflared deployment ran with the right token and arguments.
-  function tunnelView(tunnel) {
-    const connector = [...dokploy.applications.values()].find(entry => entry.name === 'content-radar-cloudflared');
-    const deployment = connector && dokploy.deployments.find(entry => entry.applicationId === connector.applicationId && entry.status === 'done');
-    const healthy = Boolean(deployment)
-      && String(deployment.snapshot.env ?? '').split('\n').includes(`TUNNEL_TOKEN=${FAKE.tunnelToken}`)
-      && JSON.stringify(deployment.snapshot.args) === JSON.stringify(['tunnel', 'run']);
-    return {
-      id: tunnel.id,
-      name: tunnel.name,
-      config_src: tunnel.config_src,
-      remote_config: tunnel.remote_config,
-      deleted_at: tunnel.deleted_at,
-      status: healthy ? 'healthy' : 'inactive',
-      connections: healthy ? [{ id: 'conn-1' }, { id: 'conn-2' }] : [],
-    };
-  }
-
   return platform;
+}
+
+/**
+ * A Dokploy domain row; by default the one the deploy wants for the app.
+ * @param {object} [overrides]
+ */
+export function appDomain(overrides = {}) {
+  return {
+    domainId: 'domain-existing',
+    host: FAKE.hostname,
+    https: true,
+    port: 3000,
+    path: '/',
+    serviceName: null,
+    domainType: 'application',
+    uniqueConfigKey: 1,
+    createdAt: '2026-10-03T15:00:00.000Z',
+    composeId: null,
+    customCertResolver: null,
+    previewDeploymentId: null,
+    certificateType: 'none',
+    internalPath: '/',
+    stripPath: false,
+    middlewares: [],
+    forwardAuthEnabled: false,
+    enabled: true,
+    customEntrypoint: null,
+    ...overrides,
+  };
 }
 
 /**
@@ -593,6 +611,16 @@ export function defaultAppResponder({ path, headers, platform }) {
   return json(404, { error: 'not_found', message: 'Không tìm thấy.' });
 }
 
+/**
+ * The origin as Traefik serves the deployed app over HTTPS: `/healthz` is
+ * the app's "ok", and every other route the app's own 401 without an Access JWT.
+ * @param {{ path: string }} request
+ */
+export async function defaultOriginProbe({ path }) {
+  if (path === '/healthz') return { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: 'ok' };
+  return { status: 401, headers: { 'content-type': 'application/json; charset=utf-8' }, body: APP_401_JSON };
+}
+
 /** Output sink that keeps what was written. */
 export function captureStream() {
   const chunks = [];
@@ -610,9 +638,9 @@ export function captureStream() {
 /**
  * Run the CLI against the fake platform with a fake clock and instant sleeps.
  * @param {string[]} argv
- * @param {{ platform: ReturnType<typeof createFakePlatform>, env?: object, stateDir?: string|null, randomBytes?: (size: number) => Buffer, probeOrigin?: Function, lookup?: Function }} options
+ * @param {{ platform: ReturnType<typeof createFakePlatform>, env?: object, stateDir?: string|null, randomBytes?: (size: number) => Buffer, probeOrigin?: Function }} options
  */
-export async function runScript(argv, { platform, env = deployEnv(), stateDir = null, randomBytes, probeOrigin, lookup } = {}) {
+export async function runScript(argv, { platform, env = deployEnv(), stateDir = null, randomBytes, probeOrigin = defaultOriginProbe } = {}) {
   const stdout = captureStream();
   const stderr = captureStream();
   let clock = Date.parse('2026-10-03T12:00:00.000Z');
@@ -626,13 +654,7 @@ export async function runScript(argv, { platform, env = deployEnv(), stateDir = 
       clock += ms;
     },
     now: () => clock,
-    lookup: lookup ?? (async () => FAKE.originIp),
-    probeOrigin: probeOrigin ?? (async ({ address }) => ({
-      address,
-      status: 404,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-      body: '404 page not found\n',
-    })),
+    probeOrigin,
     randomBytes,
     stateDir,
   });
@@ -652,7 +674,7 @@ export function isMutating(call) {
 
 /** Calls that create a resource. */
 export function isCreate(call) {
-  if (call.service === 'dokploy') return ['project.create', 'application.create', 'mounts.create'].includes(call.target);
+  if (call.service === 'dokploy') return ['project.create', 'application.create', 'mounts.create', 'domain.create'].includes(call.target);
   return call.service === 'cloudflare' && call.method === 'POST';
 }
 

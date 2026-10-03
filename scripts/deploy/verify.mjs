@@ -3,28 +3,39 @@
  * 1. Anonymous requests never get app content: Cloudflare Access answers
  *    first (a redirect to the team domain, or 401/403).
  * 2. With the agent's service token, `/api/health` is 200 with the runtime
- *    lease held and a channel count, and `telegram-main` is paused and
- *    waiting for the cutover.
- * 3. The origin is closed: the Dokploy host answers a plain-HTTP request for
- *    APP_HOSTNAME with Traefik's 404, and the app has no Traefik domain or
- *    published port.
- * 4. With `--redeploy-check`: a redeploy keeps the data (same channel
+ *    lease held and a channel count, and `telegram-main` is either paused or
+ *    active with its cutover mark (`notBefore`) set.
+ * 3. The origin, asked the way Cloudflare's proxy asks it (HTTPS to the VPS
+ *    address, SNI and Host APP_HOSTNAME): Traefik routes `/healthz` to the
+ *    app, and `/api/health` gets the app's own 401, so without an Access JWT
+ *    the origin serves no app data.
+ * 4. DNS: APP_HOSTNAME is one proxied A record to the origin address.
+ * 5. Dokploy: the app has the expected Traefik domain, no published port, one
+ *    replica, and stop-first updates.
+ * 6. With `--redeploy-check`: a redeploy keeps the data (same channel
  *    `createdAt`) and only one instance runs afterwards.
  * The service token secret is sent only to https://APP_HOSTNAME, and
- * redirects are never followed with it.
+ * redirects are never followed with it. The origin address is never printed.
  */
 
-import { request as httpRequest } from 'node:http';
-import { isIP } from 'node:net';
+import { request as httpsRequest } from 'node:https';
 
+import { describeDnsRecords, findDnsRecords, isOriginRecord } from './cloudflare-steps.mjs';
 import { NAMES, SWARM_UPDATE_CONFIG } from './config.mjs';
-import { deployAndWait, locateDokployResources, publicRoutesOf, readApplication, POLL_INTERVAL_MS } from './dokploy-steps.mjs';
+import {
+  deployAndWait, describeTraefikDomain, domainDifferences, locateDokployResources, otherDomainsWarning, partitionDomains,
+  publishedPortsOf, readApplication, readDomains, POLL_INTERVAL_MS,
+} from './dokploy-steps.mjs';
 import { describeFetchError } from './api-clients.mjs';
+import { ORIGIN_MASK } from './redaction.mjs';
 import { errorMessage } from './run-context.mjs';
 
 const CHANNEL_ID = 'telegram-main';
 const REQUEST_TIMEOUT_MS = 20_000;
 const PROBE_TIMEOUT_MS = 10_000;
+const HTTPS_PORT = 443;
+const HEALTHZ_PATH = '/healthz';
+const ORIGIN_PATHS = Object.freeze([HEALTHZ_PATH, '/api/health']);
 const MAX_BODY_CHARS = 256 * 1024;
 const APP_RESTART_WAIT_MS = 5 * 60_000;
 const INSTANCE_SAMPLES = 5;
@@ -33,13 +44,22 @@ const APP_ERROR_CODES = new Set(['unauthenticated', 'forbidden', 'access_keys_un
 const APP_CONTENT_MARKERS = ['<div id="root">', '<title>Content Radar</title>'];
 // Texts of the app's own HTML error pages (src/app/api/errors.js).
 const APP_ERROR_MARKERS = ['Cần đăng nhập qua Cloudflare Access', 'Chưa xác thực', 'Không có quyền truy cập'];
-const UNREACHABLE_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET']);
+// Traefik's answer for a host it has no route for.
+const TRAEFIK_404 = /^404 page not found$/i;
 
 /**
  * @typedef {object} Classification
  * @property {'pass'|'fail'} verdict
  * @property {string} kind
  * @property {string} detail
+ */
+
+/**
+ * @typedef {object} OriginProbeResult
+ * @property {number} [status]
+ * @property {Record<string, unknown>} [headers]
+ * @property {string} [body] At most `MAX_BODY_CHARS` characters.
+ * @property {string} [error] Error code when no HTTP answer arrived.
  */
 
 /**
@@ -100,50 +120,71 @@ export function classifyAnonymousResponse(response) {
 }
 
 /**
- * Classify the answer of the Dokploy host to `GET http://<ip>/` with `Host: APP_HOSTNAME`.
- * @param {{ address: string, status?: number, headers?: Record<string, unknown>, body?: string, error?: string }} result
+ * Classify the origin's answer to `GET https://<origin><path>` with SNI and
+ * Host APP_HOSTNAME. `/healthz` must be the app's own "ok", which shows that
+ * Traefik routes the hostname to the app; `/api/health` must be the app's own
+ * 401, which shows that the app requires an Access JWT there. App data
+ * without a JWT fails.
+ * @param {string} path One of `ORIGIN_PATHS`.
+ * @param {OriginProbeResult} result
  * @returns {Classification}
  */
-export function classifyOriginProbe(result) {
-  if (result.error) {
-    if (UNREACHABLE_CODES.has(result.error)) {
-      return pass('unreachable', `no HTTP answer from ${result.address}:80 (${result.error}), so the app is not reachable there`);
-    }
-    return fail('probe_failed', `probe of ${result.address}:80 failed: ${result.error}`);
-  }
+export function classifyOriginProbe(path, result) {
+  if (result.error) return fail('probe_failed', `no HTTPS answer (${result.error})`);
   const headers = result.headers ?? {};
   if (String(headers.server ?? '').toLowerCase() === 'cloudflare' || headers['cf-ray']) {
-    return fail('cloudflare_edge', `${result.address} is a Cloudflare address, not the server; pass --origin-ip <server IP>`);
+    return fail('cloudflare_edge', 'a Cloudflare edge answered, not the VPS: set ORIGIN_IP (or pass --origin-ip) to the server address');
   }
-  if (appResponseKind(result.body, headers['content-type'])) {
-    return fail('reached_app', `HTTP ${result.status} from the app: the origin serves APP_HOSTNAME without Access`);
+  const { status } = result;
+  const body = String(result.body ?? '');
+  if (status === 404 && TRAEFIK_404.test(body.trim())) {
+    return fail('no_route', 'Traefik\'s "404 page not found": Traefik has no route for the hostname');
   }
-  if (result.status === 404 && /^404 page not found$/i.test(String(result.body ?? '').trim())) {
-    return pass('traefik_404', `Traefik's "404 page not found" from ${result.address}`);
+  const kind = appResponseKind(body, headers['content-type']);
+  if (path === HEALTHZ_PATH) {
+    return status === 200 && body.trim() === 'ok'
+      ? pass('healthz', 'HTTP 200 "ok" from the app')
+      : fail('unexpected', `HTTP ${status}, not the app's 200 "ok"`);
   }
-  return fail('unexpected', `HTTP ${result.status} from ${result.address}, not Traefik's 404`);
+  if (kind === 'content' || (status >= 200 && status < 300)) {
+    return fail('app_data', `HTTP ${status} with app data, served without an Access JWT`);
+  }
+  if (status === 401 && kind === 'error') return pass('jwt_required', 'HTTP 401 from the app\'s own Access JWT check');
+  return fail('unexpected', `HTTP ${status}${kind ? ' from the app' : ''}, not the app's 401`);
 }
 
 /**
- * `GET http://<address>:<port><path>` with an explicit `Host` header (`fetch`
- * ignores a custom Host header, `node:http` does not).
- * @param {{ address: string, port: number, hostHeader: string, path: string, timeoutMs: number }} options
- * @returns {Promise<{ address: string, status?: number, headers?: Record<string, unknown>, body?: string, error?: string }>}
+ * `GET https://<address>:<port><path>` with SNI and `Host` set to `hostname`,
+ * as Cloudflare's proxy connects to the origin. The certificate is not
+ * verified: the origin presents a Cloudflare Origin CA certificate, which
+ * only Cloudflare trusts, and the probe checks routing and the app's guard,
+ * not TLS.
+ * @param {{ address: string, port: number, hostname: string, path: string, timeoutMs: number }} options
+ * @returns {Promise<OriginProbeResult>} Never rejects.
  */
-export function probeOriginHttp({ address, port, hostHeader, path, timeoutMs }) {
+export function probeOriginHttps({ address, port, hostname, path, timeoutMs }) {
   return new Promise(resolve => {
-    const done = value => resolve({ address, ...value });
-    const req = httpRequest({ host: address, port, path, method: 'GET', headers: { Host: hostHeader, Accept: '*/*' }, timeout: timeoutMs }, res => {
+    const req = httpsRequest({
+      host: address,
+      port,
+      path,
+      method: 'GET',
+      servername: hostname,
+      headers: { Host: hostname, Accept: '*/*' },
+      rejectUnauthorized: false,
+      agent: false,
+      timeout: timeoutMs,
+    }, res => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', chunk => {
         if (body.length < MAX_BODY_CHARS) body += chunk;
       });
-      res.on('end', () => done({ status: res.statusCode, headers: res.headers, body }));
-      res.on('error', error => done({ error: error?.code ?? 'response_error' }));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+      res.on('error', error => resolve({ error: error?.code ?? 'response_error' }));
     });
     req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
-    req.on('error', error => done({ error: error?.code ?? 'request_error' }));
+    req.on('error', error => resolve({ error: error?.code ?? 'request_error' }));
     req.end();
   });
 }
@@ -177,27 +218,37 @@ export async function runVerify(ctx) {
   record('GET /api/health with the service token', evaluateHealth(await requestApp(ctx, '/api/health', token)));
   record(`GET /api/channels/${CHANNEL_ID}/status with the service token`, evaluateChannelStatus(await requestApp(ctx, `/api/channels/${CHANNEL_ID}/status`, token)));
 
+  const { hostname, originIp } = ctx.config;
   ctx.report.section('Origin');
-  let address = null;
-  try {
-    address = await resolveOriginAddress(ctx);
-  } catch (error) {
-    record('origin probe', fail('resolve_failed', `cannot resolve the Dokploy host: ${errorMessage(error)}`));
-  }
-  if (address) {
-    const probe = await ctx.probeOrigin({ address, port: 80, hostHeader: ctx.config.hostname, path: '/', timeoutMs: PROBE_TIMEOUT_MS });
-    record(`GET http://${address}/ with Host: ${ctx.config.hostname}`, classifyOriginProbe(probe));
+  for (const path of ORIGIN_PATHS) {
+    const probe = await ctx.probeOrigin({ address: originIp, port: HTTPS_PORT, hostname, path, timeoutMs: PROBE_TIMEOUT_MS });
+    record(`GET https://${ORIGIN_MASK}${path} with SNI and Host ${hostname}`, classifyOriginProbe(path, probe));
   }
 
+  ctx.report.section('DNS');
+  try {
+    const records = await findDnsRecords(ctx);
+    record(`${hostname} is a proxied A record to ${ORIGIN_MASK}`, records.length === 1 && isOriginRecord(records[0], originIp)
+      ? pass('dns', describeDnsRecords(records, originIp))
+      : fail('dns', records.length === 0 ? 'no DNS record' : describeDnsRecords(records, originIp)));
+  } catch (error) {
+    record('DNS record', fail('dns_failed', errorMessage(error)));
+  }
+
+  ctx.report.section('Dokploy application');
   let app = null;
   try {
     const location = await locateDokployResources(ctx);
-    if (!location.apps.main) {
+    if (!location.app) {
       record('Dokploy application', fail('missing', `application "${NAMES.app}" not found in project "${NAMES.project}"`));
     } else {
-      app = await readApplication(ctx, location.apps.main.applicationId, NAMES.app);
-      const routes = publicRoutesOf(app);
-      record('no Traefik domain or published port', routes.length === 0 ? pass('closed', 'none') : fail('exposed', routes.join(', ')));
+      app = await readApplication(ctx, location.app.applicationId, NAMES.app);
+      const { matching, others } = partitionDomains(await readDomains(ctx, app.applicationId), hostname);
+      record(`Traefik domain for ${hostname}`, evaluateDomain(matching, hostname));
+      const warning = otherDomainsWarning(others);
+      if (warning) ctx.report.warn(warning);
+      const ports = publishedPortsOf(app);
+      record('no published port', ports.length === 0 ? pass('closed', 'none') : fail('exposed', ports.join(', ')));
       const order = app.updateConfigSwarm?.Order;
       record('one replica, stop-first updates', Number(app.replicas) === 1 && order === SWARM_UPDATE_CONFIG.Order
         ? pass('swarm', `replicas 1, Order ${order}`)
@@ -271,6 +322,15 @@ async function checkRedeploy(ctx, app, token, record) {
     : fail('multiple', `answers from ${holders.size} lease holder(s)${everyAnswerHoldsLease ? '' : ', some from an instance without the lease'}, replicas ${current.replicas ?? '?'}`));
 }
 
+function evaluateDomain(matching, hostname) {
+  if (matching.length === 0) return fail('missing', 'none');
+  if (matching.length > 1) return fail('duplicate', `${matching.length} domains for the hostname`);
+  const differing = domainDifferences(matching[0]);
+  return differing.length === 0
+    ? pass('domain', describeTraefikDomain(hostname))
+    : fail('differs', `differs in ${differing.join(', ')} from ${describeTraefikDomain(hostname)}`);
+}
+
 function evaluateHealth(response) {
   if (response.status !== 200 || !response.json) return fail('health', describeResponse(response));
   const { channelCount, runtime } = response.json;
@@ -279,13 +339,18 @@ function evaluateHealth(response) {
   return pass('health', `HTTP 200, runtime leased${runtime.leaseHolder?.self === true ? ' by this instance' : ''}, channelCount ${channelCount}`);
 }
 
+// Paused or active are both operator choices; an active channel that needs a
+// cutover mark but has none would post articles from before the cutover.
 function evaluateChannelStatus(response) {
   if (response.status !== 200 || !response.json) return fail('status', describeResponse(response));
   const { paused, cutoverRequired, notBefore } = response.json;
-  if (paused === true && cutoverRequired === true) {
-    return pass('status', `paused, cutoverRequired${notBefore ? `, notBefore ${notBefore}` : ', no cutover mark yet'}`);
+  if (paused === true) {
+    return pass('status', `paused${cutoverRequired === true ? ', cutoverRequired' : ''}${notBefore ? `, notBefore ${notBefore}` : ', no cutover mark yet'}`);
   }
-  return fail('status', `paused=${paused}, cutoverRequired=${cutoverRequired}`);
+  if (paused === false && (notBefore || cutoverRequired === false)) {
+    return pass('status', `active${notBefore ? `, posting only articles published after notBefore ${notBefore}` : ''}`);
+  }
+  return fail('status', `paused=${paused}, cutoverRequired=${cutoverRequired}, notBefore ${notBefore ?? 'not set'}`);
 }
 
 async function requestApp(ctx, path, headers = {}) {
@@ -315,13 +380,6 @@ async function requestApp(ctx, path, headers = {}) {
   } catch (error) {
     return { url, error: ctx.redactor.redact(describeFetchError(error, REQUEST_TIMEOUT_MS)) };
   }
-}
-
-async function resolveOriginAddress(ctx) {
-  if (ctx.config.originIp) return ctx.config.originIp;
-  const { hostname } = new URL(ctx.config.dokploy.url);
-  const bare = hostname.replace(/^\[|\]$/g, '');
-  return isIP(bare) ? bare : ctx.lookup(hostname);
 }
 
 function describeResponse(response) {

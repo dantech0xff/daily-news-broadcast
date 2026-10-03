@@ -1,7 +1,7 @@
 /**
  * Run context shared by the commands: redacted output, the API clients, the
- * dry-run planner, the injectable seams (fetch, clock, sleep, DNS lookup,
- * origin probe, random bytes), and the non-secret state cache.
+ * dry-run planner, the injectable seams (fetch, clock, sleep, origin probe,
+ * random bytes), and the non-secret state cache.
  */
 
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
@@ -58,8 +58,9 @@ export function createReporter({ stdout, stderr, redactor }) {
  * @property {typeof fetch} fetch
  * @property {(ms: number) => Promise<void>} sleep
  * @property {() => number} now Epoch milliseconds.
- * @property {(hostname: string) => Promise<string>} lookup Resolves a hostname to one IP address.
- * @property {(options: { address: string, port: number, hostHeader: string, path: string, timeoutMs: number }) => Promise<object>} probeOrigin
+ * @property {(options: { address: string, port: number, hostname: string, path: string, timeoutMs: number })
+ *   => Promise<import('./verify.mjs').OriginProbeResult>} probeOrigin HTTPS request to the origin address with
+ *   SNI and Host `hostname` (`probeOriginHttps`).
  * @property {(size: number) => Buffer} [randomBytes]
  * @property {string|null} stateDir `null` disables the state cache.
  */
@@ -98,7 +99,6 @@ export function createRunContext({ config, deps, redactor, report }) {
     fetch: deps.fetch,
     sleep: deps.sleep,
     now: deps.now,
-    lookup: deps.lookup,
     probeOrigin: deps.probeOrigin,
     randomBytes: deps.randomBytes,
     stateDir: deps.stateDir,

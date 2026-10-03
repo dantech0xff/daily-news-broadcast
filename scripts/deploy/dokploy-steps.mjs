@@ -1,6 +1,6 @@
 /**
  * Dokploy side of the deploy. Resources are looked up by name on every run
- * (project → production environment → applications), so a re-run creates
+ * (project → production environment → application), so a re-run creates
  * nothing twice, and each setting is written only when it differs.
  *
  * - The app: this repository's Dockerfile from public Git (or, with
@@ -11,14 +11,16 @@
  *   and the production environment. The existing `APP_MASTER_KEY` is always
  *   reused; a new one is generated only when none exists, passed straight to
  *   Dokploy, and never printed.
- * - cloudflared: the pinned image, `TUNNEL_TOKEN` passed straight from the
- *   Cloudflare API into Dokploy, and the arguments `tunnel run`.
- * - Neither gets a Dokploy domain (Traefik route) or a published port.
+ * - Its Dokploy domain: the Traefik route for APP_HOSTNAME (`TRAEFIK_DOMAIN`),
+ *   set once the app is deployed. Dokploy rewrites the Traefik configuration
+ *   on every domain change, so no redeploy follows. Traefik serves the app on
+ *   the VPS address too, where the app's own Access JWT check guards every
+ *   route except `/healthz`.
+ * - Never a published port: it would serve the app beside Traefik.
  */
 
-import { CLOUDFLARED_ARGS, DATA_MOUNT_PATH, NAMES, NANOSECONDS_PER_SECOND, STOP_GRACE_SECONDS, SHUTDOWN_WAIT_SECONDS, SWARM_HEALTHCHECK, SWARM_UPDATE_CONFIG, managedAppEnv } from './config.mjs';
+import { DATA_MOUNT_PATH, NAMES, NANOSECONDS_PER_SECOND, STOP_GRACE_SECONDS, SHUTDOWN_WAIT_SECONDS, SWARM_HEALTHCHECK, SWARM_UPDATE_CONFIG, TRAEFIK_DOMAIN, managedAppEnv } from './config.mjs';
 import { ApiError, isDryRun } from './api-clients.mjs';
-import { fetchTunnelToken, readTunnelStatus } from './cloudflare-steps.mjs';
 import { EnvTextError, generateMasterKey, mergeEnvText, parseEnvText } from './env-text.mjs';
 import { ensureGithubSource } from './github-source.mjs';
 import { REDACTED } from './redaction.mjs';
@@ -26,8 +28,6 @@ import { DeployStop, errorMessage } from './run-context.mjs';
 import { VaultKeyError, parseMasterKey } from '../../src/app/secrets/vault.js';
 
 export const POLL_INTERVAL_MS = 5_000;
-export const CLOUDFLARED_WAIT_MS = 10 * 60_000;
-export const TUNNEL_HEALTH_WAIT_MS = 5 * 60_000;
 const LOG_TAIL_LINES = 120;
 // The GitHub provider clones with an installation token in the URL, which a failing clone can echo.
 const LOG_CREDENTIALS = Object.freeze([
@@ -44,12 +44,12 @@ const VALIDATION_KEY = Buffer.alloc(32).toString('base64');
  * @typedef {object} DokployLocation
  * @property {any|null} project
  * @property {any|null} environment The project's production environment.
- * @property {{ main: any|null, cloudflared: any|null }} apps Application summaries by role.
+ * @property {any|null} app Summary of the application named `NAMES.app`.
  * @property {boolean} [pending] The project is only planned (dry run).
  */
 
 /**
- * Find the project, its production environment, and both applications by name.
+ * Find the project, its production environment, and the application by name.
  * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
  * @returns {Promise<DokployLocation>}
  */
@@ -61,7 +61,7 @@ export async function locateDokployResources(ctx) {
     throw new DeployStop(`Dokploy has ${matches.length} projects named "${NAMES.project}"; remove the extra ones, then re-run.`);
   }
   const [project = null] = matches;
-  if (!project) return { project: null, environment: null, apps: { main: null, cloudflared: null } };
+  if (!project) return { project: null, environment: null, app: null };
   if (!Array.isArray(project.environments)) {
     throw new DeployStop(`Dokploy project.all returned no environments for "${NAMES.project}"; this Dokploy version is not supported.`);
   }
@@ -73,26 +73,120 @@ export async function locateDokployResources(ctx) {
   if (!Array.isArray(environment.applications)) {
     throw new DeployStop('Dokploy project.all returned no applications for the production environment; this Dokploy version is not supported.');
   }
-  return {
-    project,
-    environment,
-    apps: { main: pickApplication(environment, NAMES.app), cloudflared: pickApplication(environment, NAMES.cloudflared) },
-  };
+  return { project, environment, app: pickApplication(environment, NAMES.app) };
 }
 
 /**
- * Traefik domains and published ports of an application: either one would
- * make the app reachable without Access.
+ * Published ports of an application: each one serves the app on the VPS
+ * beside Traefik.
  * @param {any} app `application.one` result.
  * @returns {string[]} Human-readable findings; empty when there are none.
  */
-export function publicRoutesOf(app) {
-  const domains = Array.isArray(app?.domains) ? app.domains : [];
+export function publishedPortsOf(app) {
   const ports = Array.isArray(app?.ports) ? app.ports : [];
-  return [
-    ...domains.map(domain => `Traefik domain ${domain?.host ?? '?'}`),
-    ...ports.map(port => `published port ${port?.publishedPort ?? '?'} → ${port?.targetPort ?? '?'}`),
-  ];
+  return ports.map(port => `published port ${port?.publishedPort ?? '?'} → ${port?.targetPort ?? '?'}`);
+}
+
+/**
+ * @param {string[]} ports From `publishedPortsOf`; not empty.
+ * @returns {string} Why they block the deploy, and what to do.
+ */
+export function publishedPortsProblem(ports) {
+  const one = ports.length === 1;
+  return `Application "${NAMES.app}" has ${ports.join(', ')}, which serve${one ? 's' : ''} the app on the VPS beside Traefik; remove ${one ? 'it' : 'them'} in Dokploy`;
+}
+
+/**
+ * The application's Dokploy domains (Traefik routes).
+ * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
+ * @param {string} applicationId
+ * @returns {Promise<any[]>}
+ */
+export async function readDomains(ctx, applicationId) {
+  const domains = await ctx.dokploy.query('domain.byApplicationId', { applicationId });
+  if (!Array.isArray(domains)) throw new DeployStop('Dokploy domain.byApplicationId did not return a list.');
+  return domains;
+}
+
+/**
+ * Split domains into the ones for `hostname` and the others.
+ * @param {any[]} domains
+ * @param {string} hostname Lowercase.
+ * @returns {{ matching: any[], others: any[] }}
+ */
+export function partitionDomains(domains, hostname) {
+  const matching = [];
+  const others = [];
+  for (const domain of domains) {
+    (String(domain?.host ?? '').trim().toLowerCase().replace(/\.$/, '') === hostname ? matching : others).push(domain);
+  }
+  return { matching, others };
+}
+
+/**
+ * Settings of a stored domain that differ from `TRAEFIK_DOMAIN`. A disabled
+ * domain has no Traefik route, so `enabled: false` differs too.
+ * @param {any} domain
+ * @returns {string[]} Field names; empty when the domain is as desired.
+ */
+export function domainDifferences(domain) {
+  const differing = Object.keys(TRAEFIK_DOMAIN).filter(key => !sameSetting(domain?.[key], TRAEFIK_DOMAIN[key]));
+  if (domain?.enabled === false) differing.push('enabled');
+  return differing;
+}
+
+/**
+ * @param {string} hostname
+ * @returns {string} The desired domain, for messages.
+ */
+export function describeTraefikDomain(hostname) {
+  const { path, port, certificateType } = TRAEFIK_DOMAIN;
+  return `https://${hostname}${path} → port ${port} (certificateType ${certificateType}: Traefik's default certificate)`;
+}
+
+/**
+ * Warning about the application's domains for other hostnames, which the
+ * deploy keeps.
+ * @param {any[]} others From `partitionDomains`.
+ * @returns {string|null}
+ */
+export function otherDomainsWarning(others) {
+  if (others.length === 0) return null;
+  const hosts = others.map(domain => domain?.host ?? '?').join(', ');
+  return `Application "${NAMES.app}" also has Traefik domains for other hostnames (${hosts}); the deploy keeps them. A hostname that Cloudflare Access does not cover reaches the app with only its own Access JWT check in front.`;
+}
+
+/**
+ * The app's Traefik domain for APP_HOSTNAME: created when missing, updated
+ * when any setting differs. Domains for other hostnames are kept, with a
+ * warning; several domains for APP_HOSTNAME stop the deploy.
+ * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
+ * @param {{ applicationId: string, pending?: boolean }} app
+ * @returns {Promise<string|null>} The domain ID, or `null` when it is only planned.
+ */
+export async function ensureAppDomain(ctx, app) {
+  const { hostname } = ctx.config;
+  const desired = { host: hostname, ...TRAEFIK_DOMAIN };
+  const { matching, others } = partitionDomains(app.pending ? [] : await readDomains(ctx, app.applicationId), hostname);
+  const warning = otherDomainsWarning(others);
+  if (warning) ctx.report.warn(warning);
+  if (matching.length > 1) {
+    throw new DeployStop(`Application "${NAMES.app}" has ${matching.length} Traefik domains for ${hostname}; keep one in Dokploy, then re-run.`);
+  }
+  if (matching.length === 0) {
+    ctx.change('create', `Traefik domain ${describeTraefikDomain(hostname)}`);
+    const created = await ctx.dokploy.mutate('domain.create', ctx.contract.fit('domain.create', { ...desired, applicationId: app.applicationId }));
+    return typeof created?.domainId === 'string' ? created.domainId : null;
+  }
+  const [domain] = matching;
+  const differing = domainDifferences(domain);
+  if (differing.length === 0) {
+    ctx.report.ok(`Traefik domain ${describeTraefikDomain(hostname)}.`);
+    return domain.domainId;
+  }
+  ctx.change('update', `Traefik domain ${describeTraefikDomain(hostname)} (was different in: ${differing.join(', ')})`);
+  await ctx.dokploy.mutate('domain.update', ctx.contract.fit('domain.update', { domainId: domain.domainId, ...desired, enabled: true }));
+  return domain.domainId;
 }
 
 /**
@@ -113,7 +207,7 @@ export async function ensureProjectEnvironment(ctx) {
     return {
       project: { projectId: '<new-project-id>' },
       environment: { environmentId: '<new-environment-id>', applications: [] },
-      apps: { main: null, cloudflared: null },
+      app: null,
       pending: true,
     };
   }
@@ -130,15 +224,14 @@ export async function ensureProjectEnvironment(ctx) {
  * @param {{ authDomain: string, aud: string }} access
  * @param {import('./github-source.mjs').GithubSource|null} [github] With `DOKPLOY_SOURCE=github`: the
  *   provider and repository resolved by preflight.
- * @returns {Promise<{ applicationId: string, appName: string }>}
+ * @returns {Promise<{ applicationId: string, appName: string, pending: boolean }>} `pending`: the
+ *   application is only planned (dry run).
  */
 export async function ensureMainApplication(ctx, location, access, github = null) {
-  const { applicationId } = await ensureApplication(ctx, location, NAMES.app, location.apps.main);
+  const applicationId = await ensureApplication(ctx, location);
   const app = await readApplication(ctx, applicationId, NAMES.app);
-  const routes = publicRoutesOf(app);
-  if (routes.length > 0) {
-    throw new DeployStop(`Application "${NAMES.app}" has ${routes.join(', ')}; that would expose the app without Access. Remove them in Dokploy, then re-run.`);
-  }
+  const ports = publishedPortsOf(app);
+  if (ports.length > 0) throw new DeployStop(`${publishedPortsProblem(ports)}, then re-run.`);
   if (!app.pending) recordState(ctx, { app: { applicationId: app.applicationId, appName: app.appName } });
   ctx.report.info(`Service name of "${NAMES.app}" on dokploy-network: ${app.appName}`);
 
@@ -150,77 +243,7 @@ export async function ensureMainApplication(ctx, location, access, github = null
   const expectStopGrace = await ensureSwarmSettings(ctx, app);
   if (!ctx.dryRun) await confirmSwarmSettings(ctx, app.applicationId, { expectStopGrace });
   await deployAndWait(ctx, app, { label: NAMES.app, timeoutMs: ctx.config.waitMs });
-  return { applicationId: app.applicationId, appName: app.appName };
-}
-
-/**
- * cloudflared: create, configure, deploy when anything changed or the tunnel
- * is not healthy, then wait until Cloudflare reports the tunnel healthy.
- * @param {ReturnType<typeof import('./run-context.mjs').createRunContext>} ctx
- * @param {DokployLocation} location
- * @param {{ id: string, pending?: boolean }} tunnel
- */
-export async function ensureCloudflaredApplication(ctx, location, tunnel) {
-  const { applicationId, created } = await ensureApplication(ctx, location, NAMES.cloudflared, location.apps.cloudflared);
-  const app = await readApplication(ctx, applicationId, NAMES.cloudflared);
-  if (!app.pending) recordState(ctx, { cloudflared: { applicationId: app.applicationId, appName: app.appName } });
-  const fit = (procedure, payload) => ctx.contract.fit(procedure, payload);
-  let changed = created;
-
-  const image = ctx.config.cloudflaredImage;
-  if (app.sourceType === 'docker' && app.dockerImage === image) {
-    ctx.report.ok(`cloudflared image is ${image}.`);
-  } else {
-    ctx.change('update', `cloudflared image → ${image}`);
-    await ctx.dokploy.mutate('application.saveDockerProvider', fit('application.saveDockerProvider', {
-      applicationId: app.applicationId, dockerImage: image, username: null, password: null, registryUrl: null,
-    }));
-    changed = true;
-  }
-
-  if (ctx.dryRun) {
-    if (parseEnvText(app.env).values.has('TUNNEL_TOKEN')) {
-      ctx.report.info('TUNNEL_TOKEN is rewritten only when it differs from the tunnel token (not fetched in a dry run).');
-    } else {
-      ctx.change('update', 'cloudflared environment: TUNNEL_TOKEN from the tunnel token API');
-      await ctx.dokploy.mutate('application.saveEnvironment', fit('application.saveEnvironment', {
-        applicationId: app.applicationId, env: 'TUNNEL_TOKEN=<tunnel-token>', buildArgs: null, buildSecrets: null, createEnvFile: false,
-      }));
-      changed = true;
-    }
-  } else {
-    // Straight from the Cloudflare API into the Dokploy request; registered with the redactor, never stored.
-    const token = await fetchTunnelToken(ctx, tunnel.id);
-    const { text, changed: envChanged } = mergeEnvironment(app.env, { TUNNEL_TOKEN: token });
-    if (envChanged) {
-      ctx.change('update', 'cloudflared environment: TUNNEL_TOKEN');
-      await ctx.dokploy.mutate('application.saveEnvironment', fit('application.saveEnvironment', {
-        applicationId: app.applicationId, env: text, buildArgs: app.buildArgs ?? null, buildSecrets: app.buildSecrets ?? null, createEnvFile: false,
-      }));
-      changed = true;
-    } else {
-      ctx.report.ok('cloudflared TUNNEL_TOKEN matches the tunnel.');
-    }
-  }
-
-  if (sameSetting(app.args, CLOUDFLARED_ARGS)) {
-    ctx.report.ok(`cloudflared arguments are "${CLOUDFLARED_ARGS.join(' ')}".`);
-  } else {
-    ctx.change('update', `cloudflared arguments → "${CLOUDFLARED_ARGS.join(' ')}"`);
-    await ctx.dokploy.mutate('application.update', fit('application.update', { applicationId: app.applicationId, args: [...CLOUDFLARED_ARGS] }));
-    changed = true;
-  }
-
-  // Redeploying cloudflared briefly drops the tunnel, so it happens only when needed.
-  const status = tunnel.pending ? null : await readTunnelStatus(ctx, tunnel.id);
-  const hasDeployment = !app.pending && (await listDeployments(ctx, app.applicationId)).some(deployment => deployment.status === 'done');
-  const deploy = changed || !hasDeployment || status?.status !== 'healthy';
-  if (deploy) {
-    await deployAndWait(ctx, app, { label: NAMES.cloudflared, timeoutMs: CLOUDFLARED_WAIT_MS });
-  } else {
-    ctx.report.ok('cloudflared is up to date and the tunnel is healthy; no redeploy needed.');
-  }
-  if (!ctx.dryRun) await waitForHealthyTunnel(ctx, tunnel.id, deploy);
+  return { applicationId: app.applicationId, appName: app.appName, pending: app.pending === true };
 }
 
 /**
@@ -313,23 +336,23 @@ function pickApplication(environment, name) {
   return matches[0] ?? null;
 }
 
-async function ensureApplication(ctx, location, name, existing) {
-  if (existing) {
+// The application's ID, creating it when missing; `null` when its creation is only planned.
+async function ensureApplication(ctx, location) {
+  const name = NAMES.app;
+  if (location.app) {
     ctx.report.ok(`Dokploy application "${name}" exists.`);
-    return { applicationId: existing.applicationId, created: false };
+    return location.app.applicationId;
   }
   ctx.change('create', `Dokploy application "${name}"`);
   const created = await ctx.dokploy.mutate('application.create', ctx.contract.fit('application.create', {
     name, appName: name, description: DESCRIPTION, environmentId: location.environment.environmentId, serverId: null,
   }));
-  if (isDryRun(created)) return { applicationId: null, created: true };
-  let applicationId = typeof created?.applicationId === 'string' ? created.applicationId : null;
-  if (!applicationId) {
-    const again = await locateDokployResources(ctx);
-    applicationId = (name === NAMES.app ? again.apps.main : again.apps.cloudflared)?.applicationId ?? null;
-  }
+  if (isDryRun(created)) return null;
+  const applicationId = typeof created?.applicationId === 'string'
+    ? created.applicationId
+    : (await locateDokployResources(ctx)).app?.applicationId ?? null;
   if (!applicationId) throw new DeployStop(`Dokploy application.create for "${name}" returned no applicationId, and the application cannot be found by name.`);
-  return { applicationId, created: true };
+  return applicationId;
 }
 
 async function ensureGitSource(ctx, app) {
@@ -500,21 +523,6 @@ async function confirmSwarmSettings(ctx, applicationId, { expectStopGrace }) {
     ctx.report.warn(`!!! Dokploy did not keep ${grace.field} = ${STOP_GRACE_SECONDS} s; a redeploy can kill a run in flight. Check the setting in Dokploy. !!!`);
   }
   ctx.report.ok('Swarm settings read back: stop-first, 1 replica.');
-}
-
-async function waitForHealthyTunnel(ctx, tunnelId, deployed) {
-  const started = ctx.now();
-  for (;;) {
-    const { status, connections } = await readTunnelStatus(ctx, tunnelId);
-    if (status === 'healthy') {
-      ctx.report.ok(`Tunnel is healthy (${connections} connection${connections === 1 ? '' : 's'}).`);
-      return;
-    }
-    if (ctx.now() - started >= TUNNEL_HEALTH_WAIT_MS) {
-      throw new DeployStop(`The tunnel is still "${status}" after ${TUNNEL_HEALTH_WAIT_MS / 60_000} min${deployed ? ' since cloudflared was deployed' : ''}; check the "${NAMES.cloudflared}" logs in Dokploy. DNS was not created.`);
-    }
-    await ctx.sleep(POLL_INTERVAL_MS);
-  }
 }
 
 async function printDeploymentLog(ctx, deploymentId, label) {

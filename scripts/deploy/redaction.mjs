@@ -1,14 +1,17 @@
 /**
  * Redaction for everything the deploy script prints or writes: known secret
- * values (API keys, the service token secret, the app master key, the tunnel
- * token) are replaced wherever they appear, and secret-looking patterns
- * (bearer tokens, auth headers, JWTs, tunnel tokens, `cfast_` service token
- * secrets) are masked even when their value was never registered.
+ * values (API keys, the service token secret, the app master key) are
+ * replaced wherever they appear, secret-looking patterns (bearer tokens, auth
+ * headers, JWTs, Cloudflare Tunnel tokens, `cfast_` service token secrets)
+ * are masked even when their value was never registered, and the origin
+ * server address (ORIGIN_IP) is shown as `ORIGIN_MASK`.
  */
 
 import { PUBLIC_ENV_KEYS } from './config.mjs';
 
 export const REDACTED = '[REDACTED]';
+/** How the origin server address appears in output. */
+export const ORIGIN_MASK = '<origin-ip>';
 
 // Shorter values would redact ordinary words.
 const MIN_SECRET_LENGTH = 8;
@@ -19,7 +22,7 @@ const PATTERNS = Object.freeze([
   [/\b(APP_MASTER_KEY|TUNNEL_TOKEN|DOKPLOY_API_KEY|CF_API_TOKEN|CF_ACCESS_CLIENT_SECRET)(\s*=\s*["']?)[^\s"',;]+/g, `$1$2${REDACTED}`],
   [/"(APP_MASTER_KEY|TUNNEL_TOKEN|DOKPLOY_API_KEY|CF_API_TOKEN|CF_ACCESS_CLIENT_SECRET)"(\s*:\s*)"[^"]*"/g, `"$1"$2"${REDACTED}"`],
   [/\bcfast_[A-Za-z0-9_-]+/g, REDACTED],
-  // JWTs, then tunnel tokens (base64 JSON that starts with {"a":).
+  // JWTs, then Cloudflare Tunnel tokens (base64 JSON that starts with {"a":).
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, REDACTED],
   [/\beyJ[A-Za-z0-9+/_=-]{24,}/g, REDACTED],
 ]);
@@ -31,6 +34,8 @@ const ENV_TEXT_KEYS = new Set(['env', 'buildArgs', 'buildSecrets']);
 export class Redactor {
   /** @type {Set<string>} */
   #secrets = new Set();
+  /** @type {RegExp[]} Forms of the origin address, shown as `ORIGIN_MASK`. */
+  #addresses = [];
 
   /**
    * Register a secret value; returns it unchanged for chaining.
@@ -50,6 +55,21 @@ export class Redactor {
   }
 
   /**
+   * Register the origin server address: not a secret, but never printed or
+   * written either. It is matched as a whole token (a longer address that
+   * merely contains it stays readable) and also in the dashed form that
+   * generated hostnames embed, such as `<app>-203-0-113-10.traefik.me`.
+   * @param {string|null|undefined} address An IPv4 address.
+   */
+  maskAddress(address) {
+    if (typeof address !== 'string' || address === '') return;
+    for (const form of new Set([address, address.replaceAll('.', '-')])) {
+      const escaped = form.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+      this.#addresses.push(new RegExp(`(?<![0-9A-Za-z])${escaped}(?![0-9A-Za-z])`, 'g'));
+    }
+  }
+
+  /**
    * @param {unknown} text
    * @returns {string}
    */
@@ -58,17 +78,19 @@ export class Redactor {
     for (const secret of [...this.#secrets].sort((left, right) => right.length - left.length)) {
       output = output.split(secret).join(REDACTED);
     }
+    for (const address of this.#addresses) output = output.replace(address, ORIGIN_MASK);
     for (const [pattern, replacement] of PATTERNS) output = output.replace(pattern, replacement);
     return output;
   }
 
   /**
-   * True when `text` contains a registered secret value.
+   * True when `text` contains a registered secret value or the origin address.
    * @param {string} text
    * @returns {boolean}
    */
   containsSecret(text) {
-    return [...this.#secrets].some(secret => text.includes(secret));
+    return [...this.#secrets].some(secret => text.includes(secret))
+      || this.#addresses.some(address => text.search(address) !== -1);
   }
 }
 

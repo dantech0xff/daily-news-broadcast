@@ -12,7 +12,7 @@ import {
 } from '../../scripts/deploy/config.mjs';
 import { analyzeDokployContract } from '../../scripts/deploy/dokploy-contract.mjs';
 import { EnvTextError, generateMasterKey, mergeEnvText, parseEnvText } from '../../scripts/deploy/env-text.mjs';
-import { REDACTED, Redactor, redactBody } from '../../scripts/deploy/redaction.mjs';
+import { ORIGIN_MASK, REDACTED, Redactor, redactBody } from '../../scripts/deploy/redaction.mjs';
 import { DEFAULT_SHUTDOWN_WAIT_SECONDS, STOP_GRACE_MARGIN_SECONDS as APP_STOP_GRACE_MARGIN, loadAppConfig } from '../../src/app/config/env.js';
 import { parseMasterKey } from '../../src/app/secrets/vault.js';
 import { FAKE, deployEnv } from './helpers/fake-platform.js';
@@ -43,6 +43,17 @@ test('the redactor masks registered secrets in every encoding and secret-looking
   assert.match(output, /prose CF_API_TOKEN: Cloudflare rejected it; the word short stays/);
   assert.equal(redactor.containsSecret(`x${key}y`), true);
   assert.equal(redactor.containsSecret('nothing here'), false);
+});
+
+test('the origin address is masked as a whole token, also dashed as in generated hostnames, and never written', () => {
+  const redactor = new Redactor();
+  redactor.maskAddress('1.2.3.4');
+  redactor.maskAddress(undefined);
+  const output = redactor.redact('to 1.2.3.4, https://1.2.3.4:443/x, {"content":"1.2.3.4"}, app-1-2-3-4.traefik.me; not 11.2.3.4, 1.2.3.45, or v21-2-3-4');
+  assert.equal(output, `to ${ORIGIN_MASK}, https://${ORIGIN_MASK}:443/x, {"content":"${ORIGIN_MASK}"}, app-${ORIGIN_MASK}.traefik.me; not 11.2.3.4, 1.2.3.45, or v21-2-3-4`);
+  // The state cache refuses to carry it, like a secret.
+  assert.equal(redactor.containsSecret('{"content":"1.2.3.4"}'), true);
+  assert.equal(redactor.containsSecret('{"content":"11.2.3.45"}'), false);
 });
 
 test('request bodies print env keys, public values, and identifiers, never secrets', () => {
@@ -135,14 +146,23 @@ test('config: secrets stay off the serializable surface and URLs are normalized'
   const serialized = JSON.stringify(config);
   for (const secret of [FAKE.dokployApiKey, FAKE.cfApiToken, FAKE.clientSecret]) assert.equal(serialized.includes(secret), false);
   assert.equal(config.dokploy.apiKey, FAKE.dokployApiKey);
+  assert.equal(config.originIp, FAKE.originIp);
+  assert.equal(Object.keys(config).includes('originIp'), false, 'the origin address is off the serializable surface');
   assert.equal(config.waitMs, 30 * 60_000);
 });
 
 test('config: per-command requirements and flag validation never echo values', () => {
   const verify = readDeployConfig(deployEnv({ CF_ACCESS_CLIENT_SECRET: '' }), { command: 'verify', flags: {} });
   assert.match(verify.problems.join(' '), /Missing environment variables: CF_ACCESS_CLIENT_SECRET/);
-  const verifyWithoutCloudflare = readDeployConfig(deployEnv({ CF_API_TOKEN: undefined, CF_ZONE_ID: undefined }), { command: 'verify', flags: {} });
-  assert.deepEqual(verifyWithoutCloudflare.problems, []);
+  // Verify reads DNS (zone and token), but needs neither the account nor the email lists.
+  const verifyWithoutAccount = readDeployConfig(deployEnv({ CF_ACCOUNT_ID: undefined, APP_OPERATOR_EMAILS: undefined }), { command: 'verify', flags: {} });
+  assert.deepEqual(verifyWithoutAccount.problems, []);
+  const verifyWithoutDns = readDeployConfig(deployEnv({ CF_API_TOKEN: undefined, CF_ZONE_ID: undefined }), { command: 'verify', flags: {} });
+  assert.match(verifyWithoutDns.problems.join(' '), /Missing environment variables: CF_API_TOKEN, CF_ZONE_ID\./);
+  // --origin-ip stands in for ORIGIN_IP.
+  const flagged = readDeployConfig(deployEnv({ ORIGIN_IP: undefined }), { command: 'verify', flags: { 'origin-ip': '198.51.100.20' } });
+  assert.deepEqual(flagged.problems, []);
+  assert.equal(flagged.config.originIp, '198.51.100.20');
 
   const flags = readDeployConfig(deployEnv(), {
     command: 'deploy',
@@ -154,9 +174,6 @@ test('config: per-command requirements and flag validation never echo values', (
   assert.match(text, /--wait-minutes must be a whole number of minutes between 1 and 240/);
   assert.match(text, /--origin-ip is not an option of the deploy command/);
   assert.equal(text.includes('token-in-url'), false);
-
-  const pinned = readDeployConfig(deployEnv(), { command: 'deploy', flags: { 'cloudflared-image': `cloudflare/cloudflared@sha256:${'a'.repeat(64)}` } });
-  assert.deepEqual(pinned.problems, []);
   assert.equal(readDeployConfig(deployEnv(), { command: 'nope', flags: {} }).config, null);
 });
 
@@ -199,9 +216,16 @@ test('the contract resolves $ref, allOf, and nullable unions, and fits payloads 
     properties: { applicationId: { type: 'string' }, buildType: { type: 'string' }, dockerfile: { type: 'string' }, dockerContextPath: { type: 'string' }, dockerBuildStage: { type: 'string' } },
     required: ['applicationId', 'buildType', 'dockerfile', 'dockerContextPath', 'dockerBuildStage'],
   });
-  doc.paths['/application.saveDockerProvider'] = post({ type: 'object', properties: { applicationId: { type: 'string' }, dockerImage: { type: 'string' } }, required: ['applicationId'] });
   doc.paths['/application.saveEnvironment'] = post({ type: 'object', properties: { applicationId: { type: 'string' }, env: nullableString }, required: ['applicationId'] });
   doc.paths['/mounts.create'] = post({ type: 'object', properties: { type: { type: 'string' }, volumeName: { type: 'string' }, mountPath: { type: 'string' }, serviceId: { type: 'string' } }, required: ['type', 'mountPath', 'serviceId'] });
+  // An instance without the domain's `enabled` switch.
+  const domainFields = {
+    host: { type: 'string' }, path: nullableString, port: { anyOf: [{ type: 'number' }, { type: 'null' }] }, https: { type: 'boolean' },
+    certificateType: { type: 'string' }, domainType: nullableString, stripPath: { type: 'boolean' },
+  };
+  doc.paths['/domain.byApplicationId'] = get(['applicationId']);
+  doc.paths['/domain.create'] = post({ type: 'object', properties: { ...domainFields, applicationId: nullableString }, required: ['host'] });
+  doc.paths['/domain.update'] = post({ type: 'object', properties: { ...domainFields, domainId: { type: 'string' } }, required: ['host', 'domainId'] });
   doc.paths['/application.update'] = post({
     type: 'object',
     properties: {
@@ -222,6 +246,8 @@ test('the contract resolves $ref, allOf, and nullable unions, and fits payloads 
   assert.deepEqual(contract.stopGrace, { field: 'stopGracePeriod', types: ['string'] });
   assert.ok(contract.notes.some(note => /healthCheckSwarm\.StartPeriod/.test(note)));
   assert.ok(contract.notes.some(note => /deployment\.readLogs has no optional field "tail"/.test(note)));
+  assert.ok(contract.notes.includes('domain.update has no optional field "enabled"; it is left out.'));
+  assert.deepEqual(contract.fit('domain.update', { domainId: 'd', host: 'h', path: '/', enabled: true }), { domainId: 'd', host: 'h', path: '/' });
 
   // Required but not nullable → empty string; nullable → null; unknown optional → left out.
   assert.deepEqual(contract.fit('application.saveGitProvider', {

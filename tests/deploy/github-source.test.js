@@ -54,7 +54,7 @@ test('switching the live app from the public Git URL to the GitHub App tracks ma
 
   const result = await runScript(MASTER, { platform, env: githubEnv() });
   assert.equal(result.code, 0, result.output);
-  // Only the source changes, then the app deploys from it: environment, master key, volume, Swarm, Access, and the tunnel stay.
+  // Only the source changes, then the app deploys from it: environment, master key, volume, Swarm, Access, the Traefik domain, and DNS stay.
   assert.deepEqual(mutations(result.calls), ['application.saveGithubProvider', 'application.deploy']);
   const [save] = result.calls.filter(call => call.target === 'application.saveGithubProvider');
   assert.deepEqual(save.body, {
@@ -213,7 +213,7 @@ test('the provider is the only one or the one DOKPLOY_GITHUB_PROVIDER names; non
   const single = await runScript(['preflight'], { platform, env: githubEnv() });
   assert.equal(single.code, 0, single.output);
   assert.match(single.stdout, /\[ok\] GitHub provider "Dokploy-2026-10-01-g7i5b9" \(githubId github-provider-0001\) can see dantech0xff\/daily-news-broadcast\./);
-  assert.match(single.stdout, /every procedure and field the deploy uses \(16 procedures\)/);
+  assert.match(single.stdout, /every procedure and field the deploy uses \(18 procedures\)/);
 
   platform.dokploy.githubProviders = [githubProvider({ githubId: 'github-old', name: 'Dokploy-2026-09-01-old', repositories: [] }), githubProvider()];
   const several = await runScript(['preflight'], { platform, env: githubEnv() });

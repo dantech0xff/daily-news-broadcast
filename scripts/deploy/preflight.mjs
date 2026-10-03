@@ -8,16 +8,19 @@
  */
 
 import { ApiError } from './api-clients.mjs';
-import { describeDnsRecords, findAccessApps, findDnsRecords, findTunnels, isCnameTo, isRemotelyManaged, tunnelTarget } from './cloudflare-steps.mjs';
+import { describeDnsRecords, findAccessApps, findDnsRecords, isOriginRecord } from './cloudflare-steps.mjs';
 import { MIN_DOKPLOY_VERSION, NAMES, SHUTDOWN_WAIT_SECONDS, STOP_GRACE_SECONDS, compareVersions, parseVersion } from './config.mjs';
 import { analyzeDokployContract } from './dokploy-contract.mjs';
-import { locateDokployResources, publicRoutesOf, readApplication } from './dokploy-steps.mjs';
+import {
+  describeTraefikDomain, domainDifferences, locateDokployResources, otherDomainsWarning, partitionDomains,
+  publishedPortsOf, publishedPortsProblem, readApplication, readDomains,
+} from './dokploy-steps.mjs';
 import { parseEnvText } from './env-text.mjs';
 import { findWebhookBypassApps, githubWebhookTarget, resolveGithubSource } from './github-source.mjs';
+import { ORIGIN_MASK } from './redaction.mjs';
 import { DeployStop, errorMessage } from './run-context.mjs';
 import { VaultKeyError, parseMasterKey } from '../../src/app/secrets/vault.js';
 
-const ACCESS_TEAM_SUFFIX = '.cloudflareaccess.com';
 const SERVICE_TOKEN_EXPIRY_WARNING_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -28,7 +31,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *   contract?: import('./dokploy-contract.mjs').DokployContract,
  *   github?: import('./github-source.mjs').GithubSource,
  * }} dokploy `github` is resolved with `DOKPLOY_SOURCE=github` only.
- * @property {{ authDomain?: string, teamName?: string, serviceTokenId?: string, zoneName?: string, tunnelId?: string }} cloudflare
+ * @property {{ authDomain?: string, serviceTokenId?: string, zoneName?: string }} cloudflare
  */
 
 /**
@@ -111,16 +114,15 @@ async function checkDokploy(ctx, checks, facts) {
     return;
   }
   checks.ok(`Dokploy project "${NAMES.project}" exists with its ${NAMES.environment} environment.`);
-  if (!location.apps.cloudflared) checks.info(`Application "${NAMES.cloudflared}" does not exist yet; the deploy creates it.`);
-  if (!location.apps.main) {
+  if (!location.app) {
     checks.info(`Application "${NAMES.app}" does not exist yet; the deploy creates it.`);
     return;
   }
   try {
-    const app = await readApplication(ctx, location.apps.main.applicationId, NAMES.app);
+    const app = await readApplication(ctx, location.app.applicationId, NAMES.app);
     checks.ok(`Application "${NAMES.app}" exists (service ${app.appName}).`);
-    const routes = publicRoutesOf(app);
-    if (routes.length > 0) checks.blocker(`Application "${NAMES.app}" has ${routes.join(', ')}, which would expose it without Access; remove them in Dokploy.`);
+    const ports = publishedPortsOf(app);
+    if (ports.length > 0) checks.blocker(`${publishedPortsProblem(ports)}.`);
     if (!Object.hasOwn(app, 'env')) {
       checks.blocker('application.one returns no env field, so the deploy could not tell whether APP_MASTER_KEY exists.');
     } else {
@@ -141,6 +143,25 @@ async function checkDokploy(ctx, checks, facts) {
   } catch (error) {
     checks.blocker(`Cannot read application "${NAMES.app}": ${errorMessage(error)}`);
   }
+  await check(checks, `Cannot read the Traefik domains of application "${NAMES.app}"`, () => checkDomain(ctx, checks, location.app.applicationId));
+}
+
+async function checkDomain(ctx, checks, applicationId) {
+  const { hostname } = ctx.config;
+  const { matching, others } = partitionDomains(await readDomains(ctx, applicationId), hostname);
+  const warning = otherDomainsWarning(others);
+  if (warning) checks.warn(warning);
+  if (matching.length > 1) {
+    checks.blocker(`Application "${NAMES.app}" has ${matching.length} Traefik domains for ${hostname}; keep one in Dokploy.`);
+    return;
+  }
+  if (matching.length === 0) {
+    checks.info(`No Traefik domain for ${hostname} yet; the deploy adds ${describeTraefikDomain(hostname)} once the app is deployed.`);
+    return;
+  }
+  const differing = domainDifferences(matching[0]);
+  if (differing.length === 0) checks.ok(`Traefik domain ${describeTraefikDomain(hostname)}.`);
+  else checks.info(`The Traefik domain for ${hostname} differs in ${differing.join(', ')}; the deploy updates it to ${describeTraefikDomain(hostname)}.`);
 }
 
 async function checkCloudflare(ctx, checks, facts) {
@@ -164,11 +185,8 @@ async function checkCloudflare(ctx, checks, facts) {
     const authDomain = typeof organization?.auth_domain === 'string' ? organization.auth_domain.trim().toLowerCase() : '';
     if (!authDomain) {
       checks.blocker(humanOrganizationAction('the organization has no auth_domain'));
-    } else if (!authDomain.endsWith(ACCESS_TEAM_SUFFIX) || authDomain === ACCESS_TEAM_SUFFIX.slice(1)) {
-      checks.blocker(`The Zero Trust team domain ${authDomain} is not a <team>${ACCESS_TEAM_SUFFIX} domain; cloudflared's Access check needs the team name.`);
     } else {
       facts.authDomain = authDomain;
-      facts.teamName = authDomain.slice(0, -ACCESS_TEAM_SUFFIX.length);
       checks.ok(`Zero Trust organization exists: team domain ${authDomain} (ACCESS_TEAM_DOMAIN=https://${authDomain}).`);
     }
   } catch (error) {
@@ -207,7 +225,7 @@ async function checkCloudflare(ctx, checks, facts) {
       checks.ok(`APP_HOSTNAME ${hostname} is in zone ${zoneName}.`);
     }
     if (zone.account?.id && String(zone.account.id).toLowerCase() !== accountId) {
-      checks.blocker(`Zone ${zoneName} belongs to another account than CF_ACCOUNT_ID; the tunnel CNAME must be in the tunnel's account.`);
+      checks.blocker(`Zone ${zoneName} belongs to another account than CF_ACCOUNT_ID, whose Access application must protect APP_HOSTNAME.`);
     }
     if (zone.status && zone.status !== 'active') checks.warn(`Zone ${zoneName} has status "${zone.status}", not active.`);
   });
@@ -260,30 +278,17 @@ async function checkCloudflare(ctx, checks, facts) {
     }
   });
 
-  let tunnelId = null;
-  await check(checks, 'Cannot list Cloudflare Tunnels', async () => {
-    const tunnels = await findTunnels(ctx);
-    if (tunnels.length > 1) {
-      checks.blocker(`There are ${tunnels.length} tunnels named "${NAMES.tunnel}"; delete the extra ones.`);
-    } else if (tunnels.length === 1 && !isRemotelyManaged(tunnels[0])) {
-      checks.blocker(`Tunnel "${NAMES.tunnel}" is managed by a local config file; the deploy manages ingress through the API.`);
-    } else if (tunnels.length === 1) {
-      tunnelId = tunnels[0].id;
-      facts.tunnelId = tunnelId;
-      checks.ok(`Tunnel "${NAMES.tunnel}" exists (id ${tunnelId}, status ${tunnels[0].status ?? 'unknown'}).`);
-    } else {
-      checks.info(`Tunnel "${NAMES.tunnel}" does not exist yet; the deploy creates it.`);
-    }
-  });
-
   await check(checks, 'Cannot list DNS records', async () => {
+    const { originIp } = ctx.config;
     const records = await findDnsRecords(ctx);
     if (records.length === 0) {
-      checks.ok(`No DNS record for ${hostname} yet; the deploy creates the proxied CNAME last.`);
-    } else if (records.length === 1 && tunnelId && isCnameTo(records[0], tunnelTarget(tunnelId))) {
-      checks.ok(`DNS: ${hostname} already points to the content-radar tunnel${records[0].proxied ? ' (proxied)' : ' (not proxied yet; the deploy turns the proxy on)'}.`);
+      checks.ok(`No DNS record for ${hostname} yet; the deploy creates the proxied A record to ${ORIGIN_MASK} (ORIGIN_IP) last.`);
+    } else if (records.length > 1) {
+      checks.blocker(`DNS has ${records.length} records for ${hostname} (${describeDnsRecords(records, originIp)}). The deploy updates one record in place and never deletes any: remove the extra ones.`);
+    } else if (isOriginRecord(records[0], originIp)) {
+      checks.ok(`DNS: ${hostname} is a proxied A record to ${ORIGIN_MASK} (ORIGIN_IP).`);
     } else {
-      checks.blocker(`DNS already has ${describeDnsRecords(records)} for ${hostname}, which is not the content-radar tunnel. The deploy never overwrites DNS records: delete it or choose another APP_HOSTNAME.`);
+      checks.warn(`DNS: ${hostname} is ${describeDnsRecords(records, originIp)}; the deploy updates this record in place to a proxied A record to ${ORIGIN_MASK} (ORIGIN_IP), as its last step.`);
     }
   });
 

@@ -5,7 +5,7 @@ Two deployments matter:
 | Target | Status |
 |---|---|
 | Cloudflare Worker `news-engine` | Still deployed in `bootstrap` mode, kept for rollback. Its `telegram-main` channel was paused at the cutover (channel version 544, 2026-10-03T14:03:30Z). |
-| Dashboard app on Dokploy behind Cloudflare Tunnel + Access | **Deployed 2026-10-03** at `https://radar.dantech.academy`. Since the cutover (`notBefore` 2026-10-03T14:03:41.986Z) it is the only engine posting to `telegram-main`. |
+| Dashboard app on Dokploy behind Cloudflare Access, served by Dokploy's Traefik | **Deployed 2026-10-03** at `https://radar.dantech.academy`. Since the cutover (`notBefore` 2026-10-03T14:03:41.986Z) it is the only engine posting to `telegram-main`. |
 
 Secrets are only ever passed through environment variables. Never print them, paste them into chat, or write them to files, logs, docs, or pull requests.
 
@@ -150,12 +150,14 @@ Never roll back to a version from before the Durable Object class creation. If t
 
 > **Status: deployed 2026-10-03** with `scripts/deploy/dokploy-cloudflare.mjs` (no manual clicks). Re-running it is safe: it looks resources up by name, changes only what differs, reuses the existing `APP_MASTER_KEY`, and redeploys the app to pick up new commits.
 
+**Change on 2026-10-03 (user decision): no tunnel.** The Cloudflare Tunnel `content-radar` and the Dokploy application `content-radar-cloudflared` that ran it were deleted, for a simpler setup with one application. The hostname now points to Dokploy's Traefik: its DNS record (same record ID) became a proxied A record to the VPS, and the application `content-radar` got a Traefik domain. The change was applied to production through the APIs; the script now provisions only this setup.
+
 | Resource | Value |
 |---|---|
-| Public hostname | `https://radar.dantech.academy` (proxied CNAME to the tunnel) |
+| Public hostname | `https://radar.dantech.academy`: a proxied A record to the VPS (`ORIGIN_IP`) |
 | Access | Team domain `small-unit-70a7.cloudflareaccess.com`; self-hosted application "Content Radar" with the reusable policies `content-radar-users` (allow, operator + viewer emails) and `content-radar-agent-service-token` (`non_identity`, the agent service token); one-time PIN login method |
-| Dokploy | v0.30.8; project `content-radar`; application `content-radar` (service `content-radar-lm6hl8` on `dokploy-network`), volume `content-radar-data` at `/data`, 1 replica, `stop-first`, stop grace 135 s, health check `/healthz` |
-| Tunnel | `content-radar` (`c93bf8ce-a77d-4e8b-9f8e-40374af8bbef`), run by the Dokploy application `content-radar-cloudflared` (`cloudflare/cloudflared:2026.9.3`) |
+| Dokploy | v0.30.8; project `content-radar`; application `content-radar` (service `content-radar-lm6hl8` on `dokploy-network`), volume `content-radar-data` at `/data`, 1 replica, `stop-first`, stop grace 135 s, health check `/healthz`; Traefik domain `radar.dantech.academy`, path `/`, port 3000, HTTPS |
+| TLS | Cloudflare terminates the public TLS and connects to the VPS over HTTPS (zone SSL/TLS mode Full or Full (strict)). There Traefik presents its default certificate, a Cloudflare Origin CA wildcard for `*.dantech.academy`, so the domain requests none (`certificateType: none`) |
 | Source | The Dokploy GitHub App provider, repository `dantech0xff/daily-news-broadcast`, branch `master`, `autoDeploy` on with trigger `push`: every push to `master` deploys ([Auto-deploy on push](#auto-deploy-on-push)) |
 
 The Dokploy panel (`deploy.dantech.academy`) is itself behind Cloudflare Access. To let the deploy script reach its API, the panel's Access application "Dokploy dashboard" also carries the `content-radar-agent-service-token` policy (added 2026-10-03, its existing email policy unchanged), and the operator environment sets `DOKPLOY_BEHIND_ACCESS=true`, which sends the service-token headers to the Dokploy API as well as the app — never to the Cloudflare API. A second Access application covers only `deploy.dantech.academy/api/deploy/github` with a Bypass policy, so the push webhooks of the Dokploy GitHub App reach Dokploy, which verifies their signature itself ([Auto-deploy on push](#auto-deploy-on-push)).
@@ -171,21 +173,23 @@ npm run deploy:dokploy
 ```
 
 ```bash
-npm run deploy:verify -- --origin-ip <vps-ip> --redeploy-check
+npm run deploy:verify -- --redeploy-check
 ```
 
 The app deploys from the GitHub App source, so the operator `.env` sets `DOKPLOY_SOURCE=github` and these commands keep that source ([Auto-deploy on push](#auto-deploy-on-push)). Without it a run moves the app back to the public Git URL and pushes stop deploying. The branch defaults to `master`; `--git-branch <name>` moves the source to another branch, with a warning.
 
-`--origin-ip` is needed because the Dokploy panel's own DNS name resolves to Cloudflare; use the origin address of the proxied A records and keep it out of the repository. Verification on 2026-10-03 passed 10/10: anonymous requests got a 302 to the Access login, the service token got `/api/health` 200 with the runtime lease held, `telegram-main` was paused with `cutoverRequired`, the origin answered Traefik's 404 for the hostname, there was no Traefik domain or published port, one replica with `stop-first`, and a redeploy kept the channel (same `createdAt`) with a single running instance. The first verification run hit a 503 on its first request because the container's first JWKS fetch exceeded jose's 5 s default; the app now allows 15 s and loads the keys right after it starts listening.
+`ORIGIN_IP` is the VPS IPv4 address: the content of the hostname's A record, and the address verify probes. It lives only in the operator `.env`, never in the repository; the scripts print `<origin-ip>` instead, and `verify --origin-ip <ipv4>` overrides it.
+
+Verification history: with the tunnel, the 2026-10-03 run passed 10/10 (Access in front, the service token accepted, the origin answering Traefik's 404 for the hostname, one replica with `stop-first`, a redeploy that kept the channel). Its first attempt hit a 503 because the container's first JWKS fetch exceeded jose's 5 s default; the app now allows 15 s and loads the keys right after it starts listening. After the switch to Traefik, checked by hand: the origin, asked over HTTPS with SNI and Host `radar.dantech.academy`, answers `/healthz` 200, `/api/health` 401 JSON (`unauthenticated`), and `/` 401 HTML; plain HTTP redirects to HTTPS; through Cloudflare, anonymous requests get a 302 to the Access login and the service token gets 200. `npm run deploy:verify` passed 10 of 10 on 2026-10-03 at 16:22 UTC, with `telegram-main` active after the cutover (the channel check accepts a paused channel, or an active one with `notBefore` set).
 
 After the first deploy, copy `APP_MASTER_KEY` from the Environment tab of the Dokploy application `content-radar` into a password manager.
 
 ```text
-Browser ──HTTPS──> Cloudflare Access (email login or service token)
-                     └─> Cloudflare Tunnel ──> cloudflared (Dokploy application)
-                                                 └─> http://<appName>:3000 on dokploy-network
-                                                       Dokploy application: this repository's Dockerfile
-                                                       1 replica, volume at /data, no Traefik domain, no published port
+Browser ──HTTPS──> Cloudflare: proxied DNS record + Access (email login or service token)
+                     └─HTTPS, SNI radar.dantech.academy──> Traefik on the VPS (ORIGIN_IP, ports 80/443, Origin CA certificate)
+                                                             └─> http://<appName>:3000 on dokploy-network
+                                                                   Dokploy application: this repository's Dockerfile
+                                                                   1 replica, volume at /data, no published port
 ```
 
 ### Dokploy Application
@@ -199,7 +203,7 @@ Browser ──HTTPS──> Cloudflare Access (email login or service token)
 | Stop grace period | At least 135 s (`SHUTDOWN_WAIT_SECONDS` + 15 s) | SIGTERM waits for the run in flight; a kill in the middle of a send leaves an ambiguous output. Find the Swarm field in the instance's OpenAPI before deploying |
 | Volume | A named volume (for example `content-radar-data`) at `/data` | Holds `content-radar.db`, `backups/`, and `news.json` across redeploys |
 | Health check | `http://127.0.0.1:3000/healthz` (Swarm intervals are in nanoseconds) | The only unauthenticated route; `/api/health` needs an Access JWT |
-| Domain and ports | None: no Traefik domain, no published port | Traefik publishes 80/443 on the VPS IP, so a Traefik route would let `curl -H "Host: <hostname>" http://<vps-ip>/` bypass Access |
+| Domain and ports | One Traefik domain: the hostname, path `/`, port 3000, HTTPS, `certificateType: none` (Traefik's default certificate). No published port | Trade-off: Traefik also answers on the VPS IP, so a request that skips Cloudflare (`curl -k --resolve <hostname>:443:<vps-ip> https://<hostname>/`) reaches the app without Access. The app checks the Access JWT itself on every route except `/healthz`, so such a request gets 401 and no data. Optional hardening: allow 80/443 on the VPS only from [Cloudflare's IP ranges](https://www.cloudflare.com/ips/) |
 
 Environment (names only; values are never committed or printed):
 
@@ -218,19 +222,18 @@ Dokploy's `saveEnvironment` replaces the whole environment string, and environme
 
 ### Cloudflare
 
-Access exists before DNS, so the hostname is never reachable unprotected:
+Access exists before DNS, and the app is deployed before Traefik routes to it, so the hostname is never reachable unprotected:
 
 1. Team domain: `GET /accounts/{account_id}/access/organizations` returns `auth_domain`. The Zero Trust organization must already exist.
 2. Login method: add a one-time PIN identity provider if the organization has none.
 3. Reusable Access policies: allow by email (operators and viewers), plus a `non_identity` policy for the agent's service token.
-4. A self-hosted Access application for the hostname with both policies; its `aud` becomes `ACCESS_AUD`.
-5. A tunnel created through the API with `config_src: "cloudflare"`. Ingress: `http://<appName>:3000` (the Dokploy application's service name on `dokploy-network`) with `originRequest.access { required: true, teamName, audTag: [aud] }`, then a catch-all `http_status:404`.
-6. `cloudflared` as a second Dokploy application: image `cloudflare/cloudflared` at a pinned version, `TUNNEL_TOKEN` from the tunnel token API (passed straight through), arguments `tunnel run`. Wait until the tunnel reports healthy.
-7. DNS: a proxied CNAME from the hostname to `<tunnel-id>.cfargotunnel.com`.
+4. A self-hosted Access application for the hostname with both policies; its `aud` becomes `ACCESS_AUD`. The Dokploy application is configured with it and deployed next.
+5. The application's Traefik domain in Dokploy (`domain.create`, or `domain.update` when a setting differs): the hostname, path `/`, port 3000, HTTPS, `certificateType: none`. Dokploy rewrites the Traefik configuration at once, without a redeploy. Domains for other hostnames are kept, with a warning.
+6. DNS, last: a proxied A record from the hostname to `ORIGIN_IP`. An existing record for the hostname (such as the former tunnel CNAME) is updated in place; several records stop the deploy, which never deletes one.
 
-Containers on `dokploy-network` can still reach the app directly, which is why the app verifies the Access JWT on every request itself.
+Traefik on the VPS IP and containers on `dokploy-network` reach the app without passing Access, which is why the app verifies the Access JWT on every request itself (all but `GET /healthz`).
 
-The deploy needs these in the operator's environment: `DOKPLOY_URL` and `DOKPLOY_API_KEY` (Dokploy v0.29.5 or later); `CF_API_TOKEN` with edit rights on Cloudflare Tunnel, Access apps and policies, Access organizations and identity providers, Access service tokens, and Zone DNS; `CF_ACCOUNT_ID`; `CF_ZONE_ID`; the hostname; the operator emails; and the service token as `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`. Check variable names only; never echo their values.
+The deploy needs these in the operator's environment: `DOKPLOY_URL` and `DOKPLOY_API_KEY` (Dokploy v0.29.5 or later); `CF_API_TOKEN` with edit rights on Access apps and policies, Access organizations and identity providers, Access service tokens, and Zone DNS; `CF_ACCOUNT_ID`; `CF_ZONE_ID`; the hostname; `ORIGIN_IP`, the VPS IPv4 address (operator `.env` only; keep it out of the repository); the operator emails; and the service token as `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`. Verify needs `CF_API_TOKEN` and `CF_ZONE_ID` as well, for its DNS check. Check variable names only; never echo their values.
 
 Optional:
 
@@ -252,7 +255,7 @@ DOKPLOY_SOURCE=github npm run deploy:dokploy -- --git-branch master
 
 - The preflight picks the GitHub provider: the only one, or the one named by `DOKPLOY_GITHUB_PROVIDER`. It blocks when there is none, when there are several and none is named, or when the provider cannot see `dantech0xff/daily-news-broadcast`. It warns, without blocking, when no Access application with a Bypass policy covers `deploy.dantech.academy/api/deploy/github`: the webhook URL Dokploy gave the GitHub App, which the check assumes is on the `DOKPLOY_URL` host.
 - The dry run should list exactly two calls: `application.saveGithubProvider` (provider, owner, repository, branch `master`, build path `/`, trigger `push`) and `application.deploy`.
-- The deploy saves the source only when it differs, turns `autoDeploy` on if it is off, and deploys once from `master`. The environment, `APP_MASTER_KEY`, volume, Swarm settings, Access, and the tunnel stay as they are. A re-run changes nothing except the usual redeploy.
+- The deploy saves the source only when it differs, turns `autoDeploy` on if it is off, and deploys once from `master`. The environment, `APP_MASTER_KEY`, volume, Swarm settings, Access, the Traefik domain, and DNS stay as they are. A re-run changes nothing except the usual redeploy.
 - Afterwards keep `DOKPLOY_SOURCE=github` in the operator `.env`. The branch defaults to `master`; `--git-branch <name>` moves the source to that branch, with a warning saying which pushes deploy from then on. A run without `DOKPLOY_SOURCE=github` moves the source back to the public Git URL, and pushes to `master` stop deploying.
 - After the first push to `master`, check that Dokploy lists a new deployment of `content-radar` for it. If none appears, the GitHub App's Recent Deliveries (its advanced settings on GitHub) show whether the webhook reached Dokploy.
 
@@ -262,11 +265,11 @@ What a push to `master` then does:
 2. Dokploy queues a deployment for each application whose GitHub source matches the push (provider, owner, repository, branch `master`) and has `autoDeploy` on with trigger `push`.
 3. Dokploy builds the image from the Dockerfile on the VPS. If the build fails, the deployment ends in error and the running container keeps serving.
 4. Swarm swaps the container `stop-first`. The old container gets SIGTERM, stops scheduling, and waits up to `SHUTDOWN_WAIT_SECONDS` (120 s) for a run in flight; the stop grace period is 135 s. It then releases the runtime lease and closes the database. The new container starts on the same `content-radar-data` volume at `/data`, makes a `VACUUM INTO` backup before any schema migration, serves `/healthz`, and takes the lease before it schedules anything.
-5. Cloudflare Tunnel and cloudflared do not change. The service name on `dokploy-network` stays the same, so `https://radar.dantech.academy` answers again as soon as the new container listens.
+5. The Traefik domain and DNS do not change. Traefik routes to the service name on `dokploy-network`, which stays the same, so `https://radar.dantech.academy` answers again as soon as the new container listens.
 
 Keep in mind:
 
-- A push deploys code only. Environment, volume, Swarm, Access, and tunnel changes still go through `npm run deploy:dokploy`, with `DOKPLOY_SOURCE=github` in the operator `.env`.
+- A push deploys code only. Environment, volume, Swarm, Access, domain, and DNS changes still go through `npm run deploy:dokploy`, with `DOKPLOY_SOURCE=github` in the operator `.env`.
 - Watch paths set on the application in Dokploy limit which pushes deploy. The deploy warns about them and clears them only when it saves the source again.
 - Every push to `master` goes to production. Merge through pull requests with the tests green. No CI runs `npm test`, so run it locally before merging.
 - A new container that fails at startup is not rolled back, because the old one is already stopped. Revert the commit on `master`, which deploys again.
@@ -274,8 +277,9 @@ Keep in mind:
 ### Verification Checklist
 
 - Anonymous requests to `https://<hostname>/` and `/api/health` are stopped by Access: anything but app content is acceptable.
-- With the service token headers (`CF-Access-Client-Id`, `CF-Access-Client-Secret`), `/api/health` returns 200, shows this instance holding the lease, and reports one channel, and `GET /api/channels/telegram-main/status` shows it paused with `cutoverRequired`.
-- `curl -H "Host: <hostname>" http://<vps-ip>/` returns Traefik's 404, and no app port is published on the host.
+- With the service token headers (`CF-Access-Client-Id`, `CF-Access-Client-Secret`), `/api/health` returns 200, shows this instance holding the lease, and reports one channel, and `GET /api/channels/telegram-main/status` shows it paused, or active with `notBefore` set.
+- Straight to the origin, `curl -k --resolve <hostname>:443:<vps-ip> https://<hostname>/healthz` returns `ok`, `/api/health` returns the app's own 401 (`unauthenticated`) and never data, and plain HTTP redirects to HTTPS. No app port is published on the host.
+- The hostname is one proxied A record to the VPS, and the application has exactly one Traefik domain for it, with the settings above.
 - A redeploy keeps the data (no new seed, no repeated migration), and two containers never run at once.
 - A person signs in through Access and the dashboard loads.
 
@@ -291,6 +295,8 @@ Goal: the dashboard app becomes the only engine posting to the `telegram-main` c
 - `npm run cutover:pause-worker -- --confirm`: Worker `telegram-main` paused at channel version 544 (2026-10-03T14:03:30Z).
 - `npm run cutover:activate -- --confirm`: `notBefore` set to 2026-10-03T14:03:41.986Z (config version 3), app channel resumed (delivery-state version 3), Worker re-checked and still paused.
 - `npm run -s cutover:check` (A5, polled about hourly for up to 24 h): exits 0 once a delivered post with a Telegram message ID exists and every delivered article was published at or after `notBefore`, 2 while nothing is delivered yet, and 1 on any violation.
+- The first sends (a manual run at 14:40 UTC, then the 15:00 tick) failed with `fetch failed`. The output was recorded as ambiguous, which blocked the channel, so it was paused and the item abandoned (delivery-state version 9); the connection had never been established, so nothing reached Telegram. Probing from inside the container showed Telegram was reachable, not blocked: Node gives each address of a host 250 ms to connect (`autoSelectFamily`), the TCP handshake from the VPS to api.telegram.org takes about 215 to 260 ms, and the next address (IPv6) fails at once in a container without IPv6, so the connection failed with ETIMEDOUT. The server now raises that per-address timeout to 2.5 s at startup.
+- A5 met on 2026-10-03: `npm run cutover:activate -- --confirm --run-now` resumed the channel (`notBefore` kept) and the manual run delivered "Accelerating Spatio-Temporal Attention for Video Diffusion on TPUs" at 16:03:47 UTC, Telegram message `1611`, delivery `833249e997354543b64576af4dc207d01c9cf18141f216d94c215b9d47bdeccd`; `cutover:check` exits 0. Since then the channel posts on its schedule.
 
 The commands read their settings from the environment or `.env` (`TRIGGER_SECRET`, `OPERATOR_SECRET`, `APP_HOSTNAME`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`), refuse every change without `--confirm`, and never print secrets.
 

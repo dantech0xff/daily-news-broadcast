@@ -9,6 +9,7 @@ import { parseMasterKey } from '../../src/app/secrets/vault.js';
 import {
   FAKE,
   FAKE_SECRETS,
+  appDomain,
   createFakePlatform,
   deployEnv,
   dokployOpenApi,
@@ -17,16 +18,23 @@ import {
   runScript,
   seedApplication,
   seedProject,
+  showsAddress,
 } from './helpers/fake-platform.js';
 
 const indexOf = (calls, predicate) => calls.findIndex(predicate);
 const appIdByName = (platform, name) => [...platform.dokploy.applications.values()].find(app => app.name === name)?.applicationId;
+const mainApp = platform => [...platform.dokploy.applications.values()].find(app => app.name === 'content-radar');
 const dokployCalls = (calls, target) => calls.filter(call => call.service === 'dokploy' && call.target === target);
+const mutations = calls => calls.filter(isMutating).map(call => call.target);
+const recordView = ({ id, type, name, content, proxied }) => ({ id, type, name, content, proxied });
+const DESIRED_DOMAIN = Object.freeze({ path: '/', port: 3000, https: true, certificateType: 'none', domainType: 'application', stripPath: false });
+const DNS_COMMENT = 'Content Radar on Dokploy Traefik (scripts/deploy/dokploy-cloudflare.mjs)';
 
 function assertNoSecrets(text, extra = []) {
   for (const secret of [...FAKE_SECRETS, ...extra]) {
     assert.equal(text.includes(secret), false, 'a secret value was printed or written');
   }
+  assert.equal(showsAddress(text), false, 'the origin address was printed or written');
 }
 
 async function tempDir(t) {
@@ -42,21 +50,18 @@ test('deploy creates everything in a safe order, and a second run creates nothin
 
   const { calls } = first;
   const mainId = appIdByName(platform, 'content-radar');
-  const connectorId = appIdByName(platform, 'content-radar-cloudflared');
   const accessApp = indexOf(calls, call => call.service === 'cloudflare' && call.method === 'POST' && call.target.endsWith('/access/apps'));
   const policies = calls.filter(call => call.method === 'POST' && call.target.endsWith('/access/policies'));
   const appCreate = indexOf(calls, call => call.target === 'application.create' && call.body.name === 'content-radar');
   const appDeploy = indexOf(calls, call => call.target === 'application.deploy' && call.body.applicationId === mainId);
-  const ingress = indexOf(calls, call => call.method === 'PUT' && call.target.endsWith('/configurations'));
-  const connectorDeploy = indexOf(calls, call => call.target === 'application.deploy' && call.body.applicationId === connectorId);
+  const domainCreate = indexOf(calls, call => call.target === 'domain.create');
   const dns = indexOf(calls, call => call.method === 'POST' && call.target.endsWith('/dns_records'));
 
-  // (a) Access before (b) the app; the app is deployed before (c) the tunnel points at it; (d) DNS last.
+  // (a) Access before (b) the app; the app is deployed before (c) Traefik routes the hostname to it; (d) DNS last.
   assert.equal(policies.length, 2);
   assert.ok(accessApp > -1 && accessApp < appCreate, 'the Access application exists before the Dokploy app');
-  assert.ok(appDeploy > -1 && appDeploy < ingress, 'the app is deployed before the tunnel ingress points at it');
-  assert.ok(ingress < connectorDeploy, 'ingress is set before cloudflared starts');
-  assert.ok(accessApp < dns && connectorDeploy < dns, 'DNS comes after Access and the tunnel');
+  assert.ok(appDeploy > -1 && appDeploy < domainCreate, 'the app is deployed before its Traefik domain exists');
+  assert.ok(domainCreate < dns, 'DNS comes after the Traefik domain');
   assert.equal(calls.findLastIndex(isMutating), dns, 'the DNS record is the last change');
 
   // Access: the email policy, the service token policy, both attached to the app.
@@ -71,7 +76,7 @@ test('deploy creates everything in a safe order, and a second run creates nothin
   assert.deepEqual(app.policies.map(policy => policy.id), [allow.id, service.id]);
   assert.equal(platform.cloudflare.identityProviders[0].type, 'onetimepin');
 
-  // Dokploy: source, build, volume; the tunnel goes straight to the service, with Access enforced by cloudflared.
+  // Dokploy: source, build, volume, and one HTTPS Traefik domain for the hostname; never a published port.
   const main = platform.dokploy.applications.get(mainId);
   assert.equal(main.customGitUrl, 'https://github.com/dantech0xff/daily-news-broadcast.git');
   assert.equal(main.customGitBranch, 'master');
@@ -81,33 +86,28 @@ test('deploy creates everything in a safe order, and a second run creates nothin
   assert.equal(main.createEnvFile, false);
   assert.deepEqual(main.mounts.map(({ type, volumeName, mountPath }) => ({ type, volumeName, mountPath })),
     [{ type: 'volume', volumeName: 'content-radar-data', mountPath: '/data' }]);
-  const tunnel = platform.cloudflare.tunnels[0];
-  assert.equal(tunnel.config_src, 'cloudflare');
-  assert.deepEqual(platform.cloudflare.tunnelConfigs.get(tunnel.id).ingress, [
-    {
-      hostname: FAKE.hostname,
-      service: `http://${main.appName}:3000`,
-      originRequest: { access: { required: true, teamName: 'radar-team', audTag: [app.aud] } },
-    },
-    { service: 'http_status:404' },
-  ]);
-  const connector = platform.dokploy.applications.get(connectorId);
-  assert.equal(connector.dockerImage, 'cloudflare/cloudflared:2026.9.3');
-  assert.deepEqual(connector.args, ['tunnel', 'run']);
-  assert.deepEqual(platform.cloudflare.dnsRecords.map(({ type, name, content, proxied }) => ({ type, name, content, proxied })),
-    [{ type: 'CNAME', name: FAKE.hostname, content: `${tunnel.id}.cfargotunnel.com`, proxied: true }]);
-  // Never a Traefik domain or a published port.
-  assert.equal(calls.some(call => /^(domain|port)\./.test(call.target)), false);
+  assert.deepEqual(calls[domainCreate].body, { host: FAKE.hostname, ...DESIRED_DOMAIN, applicationId: mainId });
+  assert.equal(main.domains.length, 1);
+  assert.deepEqual(main.ports, []);
+  assert.equal(platform.dokploy.applications.size, 1, 'one application: no connector beside the app');
+
+  // DNS: the hostname is a proxied A record to the origin.
+  assert.deepEqual(platform.cloudflare.dnsRecords.map(({ type, name, content, proxied, ttl, comment }) => ({ type, name, content, proxied, ttl, comment })),
+    [{ type: 'A', name: FAKE.hostname, content: FAKE.originIp, proxied: true, ttl: 1, comment: DNS_COMMENT }]);
+  assert.match(first.stdout, /\[create\] Traefik domain https:\/\/radar\.example\.test\/ → port 3000 \(certificateType none: Traefik's default certificate\)/);
+  assert.match(first.stdout, /\[create\] DNS: proxied A record radar\.example\.test → <origin-ip> \(ORIGIN_IP\)/);
+  assert.match(first.stdout, /Done: https:\/\/radar\.example\.test → Cloudflare Access → Traefik on the VPS → content-radar-x7k2q9:3000/);
   assertNoSecrets(first.output);
 
   const second = await runScript(['deploy'], { platform });
   assert.equal(second.code, 0, second.output);
   assert.deepEqual(second.calls.filter(isCreate), [], 'a second run creates nothing');
   // Only the app itself is redeployed (to pick up new commits); nothing else changes.
-  assert.deepEqual(second.calls.filter(isMutating).map(call => call.target), ['application.deploy']);
+  assert.deepEqual(mutations(second.calls), ['application.deploy']);
   assert.equal(second.calls.find(isMutating).body.applicationId, mainId);
-  assert.equal(platform.dokploy.applications.size, 2);
-  assert.equal(platform.cloudflare.tunnels.length, 1);
+  assert.match(second.stdout, /\[ok\] Traefik domain https:\/\/radar\.example\.test\/ → port 3000/);
+  assert.match(second.stdout, /\[ok\] DNS: radar\.example\.test is a proxied A record to <origin-ip>\./);
+  assert.equal(main.domains.length, 1);
   assert.equal(platform.cloudflare.dnsRecords.length, 1);
   assertNoSecrets(second.output);
 });
@@ -149,16 +149,16 @@ test('APP_MASTER_KEY is generated once, reused afterwards, and never printed or 
     PUBLIC_ORIGIN: `https://${FAKE.hostname}`,
     SHUTDOWN_WAIT_SECONDS: '120',
   });
-  // The tunnel token goes straight from the Cloudflare API into Dokploy.
-  const connectorId = appIdByName(platform, 'content-radar-cloudflared');
-  const [connectorSave] = dokployCalls(first.calls, 'application.saveEnvironment').filter(call => call.body.applicationId === connectorId);
-  assert.equal(parseEnvText(connectorSave.body.env).values.get('TUNNEL_TOKEN'), FAKE.tunnelToken);
 
   assert.match(first.stderr, /new APP_MASTER_KEY was generated.*password manager/);
   assertNoSecrets(first.output, [expectedKey]);
+  // The state cache keeps resource IDs only: no secret, and not the address the DNS record points to.
   const state = await readFile(join(stateDir, 'state.json'), 'utf8');
   assertNoSecrets(state, [expectedKey]);
-  assert.equal(JSON.parse(state).dokploy.app.applicationId, mainId);
+  const ids = JSON.parse(state);
+  assert.equal(ids.dokploy.app.applicationId, mainId);
+  assert.equal(ids.dokploy.domainId, platform.dokploy.applications.get(mainId).domains[0].domainId);
+  assert.deepEqual(ids.dns, { recordId: platform.cloudflare.dnsRecords[0].id, type: 'A', proxied: true });
   assert.equal((await stat(join(stateDir, 'state.json'))).mode & 0o777, 0o600);
 
   // A later run with a changed viewer list rewrites the environment with the same key.
@@ -195,7 +195,7 @@ test('an existing app keeps its master key and unmanaged variables', async () =>
   assert.equal(env.get('CONTENT_SCAN_RETENTION_DAYS'), '60');
   assert.equal(env.get('NODE_ENV'), 'production');
   assert.match(result.stdout, /Keeping variables the deploy does not manage: CONTENT_SCAN_RETENTION_DAYS/);
-  assert.deepEqual(result.calls.filter(call => call.target === 'application.create').map(call => call.body.name), ['content-radar-cloudflared']);
+  assert.deepEqual(result.calls.filter(call => call.target === 'application.create'), []);
   assertNoSecrets(result.output, [existingKey]);
 });
 
@@ -232,9 +232,6 @@ test('the app is set to stop-first with a /healthz health check and a stop grace
   // The settings are read back before the deploy.
   const readBack = indexOf(result.calls, (call, index) => index > update && call.target === 'application.one' && call.query.applicationId === mainId);
   assert.ok(readBack > update && readBack < deploy);
-  const connectorId = appIdByName(platform, 'content-radar-cloudflared');
-  const connectorUpdate = result.calls.find(call => call.target === 'application.update' && call.body.applicationId === connectorId);
-  assert.deepEqual(connectorUpdate.body, { applicationId: connectorId, args: ['tunnel', 'run'] });
 });
 
 test('without a stop grace field or StartPeriod the deploy leaves them out and warns loudly', async () => {
@@ -277,42 +274,140 @@ test('a start-first setting that does not stick stops the deploy before anything
   assert.equal(result.calls.some(call => call.target === 'application.deploy'), false);
 });
 
-test('a DNS record that points elsewhere blocks the deploy before any change', async () => {
-  const conflict = { id: 'dns-existing', type: 'A', name: FAKE.hostname, content: '198.51.100.7', proxied: true };
-  const platform = createFakePlatform({ dnsRecords: [{ ...conflict }] });
+test('a Traefik domain that differs is updated with every setting, and a dry run only plans it', async () => {
+  const platform = createFakePlatform();
+  assert.equal((await runScript(['deploy'], { platform })).code, 0);
+  const [domain] = mainApp(platform).domains;
+  Object.assign(domain, {
+    host: 'Radar.Example.Test', path: '/app', port: 80, https: false, certificateType: 'letsencrypt', domainType: null, stripPath: true, enabled: false,
+  });
+  const drifted = structuredClone(domain);
+
+  const dry = await runScript(['deploy', '--dry-run'], { platform });
+  assert.equal(dry.code, 0, dry.output);
+  assert.deepEqual(dry.calls.filter(isMutating), [], 'a dry run sends no change');
+  assert.match(dry.stdout, /\[plan update\] Traefik domain https:\/\/radar\.example\.test\/ → port 3000 \(certificateType none: Traefik's default certificate\) \(was different in: path, port, https, certificateType, domainType, stripPath, enabled\)/);
+  assert.match(dry.stdout, /#2 POST dokploy domain\.update \{"domainId":"domain-\d+","host":"radar\.example\.test","path":"\/","port":3000,"https":true,"certificateType":"none","domainType":"application","stripPath":false,"enabled":true\}/);
+  assert.match(dry.stdout, /2 change\(s\) planned; nothing was sent/);
+  assert.deepEqual(domain, drifted);
+
   const result = await runScript(['deploy'], { platform });
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /DNS already has A 198\.51\.100\.7 \(proxied\) for radar\.example\.test/);
-  assert.match(result.stderr, /The deploy did not start/);
-  assert.deepEqual(result.calls.filter(isMutating), []);
-  assert.deepEqual(platform.cloudflare.dnsRecords, [conflict]);
+  assert.equal(result.code, 0, result.output);
+  // Dokploy applies a domain change to Traefik at once: no second deploy.
+  assert.deepEqual(mutations(result.calls), ['application.deploy', 'domain.update']);
+  assert.deepEqual(result.calls.find(call => call.target === 'domain.update').body, {
+    domainId: domain.domainId, host: FAKE.hostname, ...DESIRED_DOMAIN, enabled: true,
+  });
+  assert.deepEqual(mainApp(platform).domains.map(({ host, path, port, https, certificateType, domainType, stripPath, enabled }) => ({ host, path, port, https, certificateType, domainType, stripPath, enabled })),
+    [{ host: FAKE.hostname, ...DESIRED_DOMAIN, enabled: true }]);
+
+  const again = await runScript(['deploy'], { platform });
+  assert.equal(again.code, 0, again.output);
+  assert.deepEqual(mutations(again.calls), ['application.deploy']);
 });
 
-test('a DNS record that appears during the deploy is never overwritten', async () => {
-  const conflict = { id: 'dns-late', type: 'CNAME', name: FAKE.hostname, content: 'elsewhere.example.net', proxied: false };
+test('domains for other hostnames are kept with a warning; several for the hostname stop the deploy', async () => {
+  const platform = createFakePlatform();
+  const environmentId = seedProject(platform);
+  // Dokploy's generated hostnames embed the server address in dashed form.
+  const generated = `content-radar-x7k2q9-${FAKE.originIp.replaceAll('.', '-')}.traefik.me`;
+  seedApplication(platform, {
+    name: 'content-radar', appName: 'content-radar', environmentId, domains: [appDomain({ domainId: 'domain-generated', host: generated, https: false })],
+  });
+  const result = await runScript(['deploy'], { platform });
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.stderr, /\[warn\] Application "content-radar" also has Traefik domains for other hostnames \(content-radar-x7k2q9-<origin-ip>\.traefik\.me\); the deploy keeps them\./);
+  assert.deepEqual(mainApp(platform).domains.map(domain => domain.host), [generated, FAKE.hostname]);
+  assert.equal(result.calls.some(call => call.target === 'domain.delete'), false);
+  assertNoSecrets(result.output);
+
+  mainApp(platform).domains.push(appDomain({ domainId: 'domain-duplicate', port: 8080 }));
+  const duplicate = await runScript(['deploy'], { platform });
+  assert.equal(duplicate.code, 1);
+  assert.match(duplicate.stderr, /\[blocker\] Application "content-radar" has 2 Traefik domains for radar\.example\.test; keep one in Dokploy\./);
+  assert.match(duplicate.stderr, /The deploy did not start/);
+  assert.deepEqual(duplicate.calls.filter(isMutating), []);
+});
+
+test('a published port stops the deploy before any change', async () => {
+  const platform = createFakePlatform();
+  const environmentId = seedProject(platform);
+  seedApplication(platform, { name: 'content-radar', appName: 'content-radar', environmentId, ports: [{ portId: 'p1', publishedPort: 3000, targetPort: 3000 }] });
+  const result = await runScript(['deploy'], { platform });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /\[blocker\] Application "content-radar" has published port 3000 → 3000, which serves the app on the VPS beside Traefik; remove it in Dokploy\./);
+  assert.deepEqual(result.calls.filter(isMutating), []);
+});
+
+test('an existing record for the hostname, such as the old tunnel CNAME, is updated in place to the origin', async () => {
+  const cname = { id: 'dns-existing', type: 'CNAME', name: FAKE.hostname, content: 'c93bf8ce-0000-4000-8000-000000000000.cfargotunnel.com', proxied: true, ttl: 1 };
+  const platform = createFakePlatform({ dnsRecords: [{ ...cname }] });
+
+  const preflight = await runScript(['preflight'], { platform });
+  assert.equal(preflight.code, 0, preflight.output);
+  assert.match(preflight.stderr, /\[warn\] DNS: radar\.example\.test is CNAME c93bf8ce-0000-4000-8000-000000000000\.cfargotunnel\.com \(proxied\); the deploy updates this record in place to a proxied A record to <origin-ip> \(ORIGIN_IP\), as its last step\./);
+
+  const dry = await runScript(['deploy', '--dry-run'], { platform });
+  assert.equal(dry.code, 0, dry.output);
+  assert.match(dry.stdout, /#\d+ PUT cloudflare \/zones\/[0-9a-f]+\/dns_records\/dns-existing \{"type":"A","name":"radar\.example\.test","content":"<origin-ip>","proxied":true,"ttl":1,"comment":"Content Radar on Dokploy Traefik \(scripts\/deploy\/dokploy-cloudflare\.mjs\)"\}/);
+  assert.deepEqual(platform.cloudflare.dnsRecords, [cname]);
+
+  const result = await runScript(['deploy'], { platform });
+  assert.equal(result.code, 0, result.output);
+  assert.deepEqual(result.calls.filter(call => call.service === 'cloudflare' && isMutating(call) && call.target.includes('/dns_records')).map(call => `${call.method} ${call.target}`),
+    [`PUT /zones/${FAKE.zoneId}/dns_records/dns-existing`]);
+  assert.deepEqual(platform.cloudflare.dnsRecords.map(recordView), [{ id: 'dns-existing', type: 'A', name: FAKE.hostname, content: FAKE.originIp, proxied: true }]);
+  assert.match(result.stdout, /\[update\] DNS: radar\.example\.test CNAME c93bf8ce-0000-4000-8000-000000000000\.cfargotunnel\.com \(proxied\) → proxied A record to <origin-ip> \(ORIGIN_IP\), same record/);
+  for (const run of [preflight, dry, result]) assertNoSecrets(run.output);
+});
+
+test('an A record to another address, or one without the proxy, is updated in place', async () => {
+  for (const drift of [{ content: '198.51.100.7' }, { proxied: false }]) {
+    const platform = createFakePlatform();
+    assert.equal((await runScript(['deploy'], { platform })).code, 0);
+    Object.assign(platform.cloudflare.dnsRecords[0], drift);
+    const [{ id }] = platform.cloudflare.dnsRecords;
+    const result = await runScript(['deploy'], { platform });
+    assert.equal(result.code, 0, result.output);
+    assert.deepEqual(result.calls.filter(isMutating).map(call => `${call.method} ${call.target}`),
+      ['POST application.deploy', `PUT /zones/${FAKE.zoneId}/dns_records/${id}`], JSON.stringify(drift));
+    assert.deepEqual(platform.cloudflare.dnsRecords.map(recordView), [{ id, type: 'A', name: FAKE.hostname, content: FAKE.originIp, proxied: true }]);
+    assert.equal(result.output.includes('198.51.100.7'), false, 'no address is printed');
+    assertNoSecrets(result.output);
+  }
+});
+
+test('several DNS records for the hostname block the deploy, and none is deleted', async () => {
+  const records = [
+    { id: 'dns-a', type: 'A', name: FAKE.hostname, content: FAKE.originIp, proxied: true },
+    { id: 'dns-aaaa', type: 'AAAA', name: FAKE.hostname, content: '2001:db8::7', proxied: true },
+  ];
+  const platform = createFakePlatform({ dnsRecords: structuredClone(records) });
+  const result = await runScript(['deploy'], { platform });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /\[blocker\] DNS has 2 records for radar\.example\.test \(A <origin-ip> \(proxied\), AAAA <other address> \(proxied\)\)\. The deploy updates one record in place and never deletes any/);
+  assert.match(result.stderr, /The deploy did not start/);
+  assert.deepEqual(result.calls.filter(isMutating), []);
+  assert.deepEqual(platform.cloudflare.dnsRecords, records);
+  assert.equal(result.output.includes('2001:db8::7'), false);
+  assertNoSecrets(result.output);
+});
+
+test('DNS records that appear during the deploy are read again: several of them stop it before any DNS change', async () => {
+  const late = [
+    { id: 'dns-late-1', type: 'A', name: FAKE.hostname, content: '198.51.100.7', proxied: true },
+    { id: 'dns-late-2', type: 'A', name: FAKE.hostname, content: '198.51.100.8', proxied: true },
+  ];
   const platform = createFakePlatform({
     onRequest(call, fake) {
-      if (call.method === 'POST' && call.target.endsWith('/cfd_tunnel') && fake.cloudflare.dnsRecords.length === 0) {
-        fake.cloudflare.dnsRecords.push({ ...conflict });
-      }
+      if (call.target === 'domain.create' && fake.cloudflare.dnsRecords.length === 0) fake.cloudflare.dnsRecords.push(...structuredClone(late));
     },
   });
   const result = await runScript(['deploy'], { platform });
   assert.equal(result.code, 1);
-  assert.match(result.stderr, /The deploy stopped: DNS already has CNAME elsewhere\.example\.net for radar\.example\.test/);
+  assert.match(result.stderr, /The deploy stopped: DNS has 2 records for radar\.example\.test \(A <other address> \(proxied\), A <other address> \(proxied\)\)/);
   assert.deepEqual(result.calls.filter(call => call.target.includes('/dns_records') && isMutating(call)), []);
-  assert.deepEqual(platform.cloudflare.dnsRecords, [conflict]);
-});
-
-test('a tunnel CNAME that is not proxied yet is switched to proxied', async () => {
-  const platform = createFakePlatform();
-  assert.equal((await runScript(['deploy'], { platform })).code, 0);
-  platform.cloudflare.dnsRecords[0].proxied = false;
-  const result = await runScript(['deploy'], { platform });
-  assert.equal(result.code, 0, result.output);
-  const patch = result.calls.find(call => call.method === 'PATCH');
-  assert.deepEqual(patch.body, { proxied: true });
-  assert.equal(platform.cloudflare.dnsRecords[0].proxied, true);
+  assert.deepEqual(platform.cloudflare.dnsRecords, late);
 });
 
 test('extra policies on the Access application are kept and reported', async () => {
@@ -359,7 +454,6 @@ test('dry run lists the planned changes in order and sends none of them', async 
   const result = await runScript(['deploy', '--dry-run'], { platform });
   assert.equal(result.code, 0, result.output);
   assert.deepEqual(result.calls.filter(isMutating), [], 'no mutating call is sent');
-  assert.equal(result.calls.some(call => call.target.endsWith('/token')), false, 'no secret is fetched in a dry run');
   const planned = [...result.stdout.matchAll(/^ {4}#(\d+) (POST|PUT|PATCH) (dokploy|cloudflare) (\S+)/gm)]
     .map(([, number, method, service, target]) => ({ number: Number(number), method, service, target }));
   assert.deepEqual(planned.map(entry => entry.number), planned.map((_, index) => index + 1));
@@ -377,18 +471,13 @@ test('dry run lists the planned changes in order and sends none of them', async 
     'mounts.create',
     'application.update',
     'application.deploy',
-    '/cfd_tunnel',
-    '/cfd_tunnel/<new-tunnel-id>/configurations',
-    'application.create',
-    'application.saveDockerProvider',
-    'application.saveEnvironment',
-    'application.update',
-    'application.deploy',
+    'domain.create',
     '/dns_records',
   ]);
   assert.match(result.stdout, /APP_MASTER_KEY=\[REDACTED\]/);
-  assert.match(result.stdout, /TUNNEL_TOKEN=\[REDACTED\]/);
-  assert.match(result.stdout, /20 change\(s\) planned; nothing was sent/);
+  assert.match(result.stdout, /#13 POST dokploy domain\.create \{"host":"radar\.example\.test","path":"\/","port":3000,"https":true,"certificateType":"none","domainType":"application","stripPath":false,"applicationId":"<new-application-id:content-radar>"\}/);
+  assert.match(result.stdout, /#14 POST cloudflare \/zones\/[0-9a-f]+\/dns_records \{"type":"A","name":"radar\.example\.test","content":"<origin-ip>","proxied":true,"ttl":1,"comment":"Content Radar on Dokploy Traefik \(scripts\/deploy\/dokploy-cloudflare\.mjs\)"\}/);
+  assert.match(result.stdout, /14 change\(s\) planned; nothing was sent/);
   assertNoSecrets(result.output);
   assert.equal(platform.dokploy.applications.size, 0);
   assert.equal(platform.cloudflare.policies.length, 0);
@@ -404,7 +493,7 @@ test('dry run against a finished deployment plans only the app deploy', async ()
   assert.match(result.stdout, /1 change\(s\) planned; nothing was sent/);
 });
 
-test('a failed build prints the redacted deployment log and stops before the tunnel', async () => {
+test('a failed build prints the redacted deployment log and stops before the domain and DNS', async () => {
   const leakedKey = Buffer.alloc(32, 9).toString('base64');
   const platform = createFakePlatform({
     failDeploymentOf: 'content-radar',
@@ -413,19 +502,19 @@ test('a failed build prints the redacted deployment log and stops before the tun
       `curl -H "x-api-key: ${FAKE.dokployApiKey}" http://localhost:3000`,
       `APP_MASTER_KEY=${leakedKey}`,
       `Authorization: Bearer ${FAKE.cfApiToken}`,
-      'Error: vite build ran out of memory',
+      `Error: cannot reach https://${FAKE.originIp}:443`,
     ].join('\n'),
   });
   const result = await runScript(['deploy'], { platform, randomBytes: () => Buffer.alloc(32, 9) });
   assert.equal(result.code, 1);
   assert.match(result.stderr, /Last 5 log lines of the content-radar deployment \(redacted\)/);
-  assert.match(result.stderr, /vite build ran out of memory/);
+  assert.match(result.stderr, /Error: cannot reach https:\/\/<origin-ip>:443/);
   assert.match(result.stderr, /ended with status "error"/);
   assertNoSecrets(result.output, [leakedKey]);
   const failedDeploy = result.calls.findIndex(call => call.target === 'application.deploy');
   assert.ok(failedDeploy > -1);
-  assert.deepEqual(result.calls.slice(failedDeploy + 1).filter(call => call.service === 'cloudflare'), [], 'nothing touches the tunnel or DNS after a failed build');
-  assert.equal(result.calls.some(call => call.service === 'cloudflare' && isMutating(call) && /cfd_tunnel|dns_records/.test(call.target)), false);
+  assert.deepEqual(result.calls.slice(failedDeploy + 1).filter(call => call.service === 'cloudflare'), [], 'nothing touches DNS after a failed build');
+  assert.equal(result.calls.some(call => call.target.startsWith('domain.')), false, 'Traefik never routes to a failed build');
 });
 
 test('an unknown deployment status stops the wait at once instead of timing out', async () => {
@@ -442,7 +531,7 @@ test('a deployment that never finishes times out with a clear message', async ()
   const result = await runScript(['deploy', '--wait-minutes', '2'], { platform });
   assert.equal(result.code, 1);
   assert.match(result.stderr, /The content-radar deployment is still "running" after 2 min; check it in Dokploy, then re-run/);
-  assert.equal(result.calls.some(call => call.target.includes('cfd_tunnel') && isMutating(call)), false);
+  assert.deepEqual(result.calls.filter(call => isMutating(call) && (call.target.startsWith('domain.') || call.target.includes('/dns_records'))), []);
 });
 
 test('missing variables are named, values are never printed, and the deploy does not start', async () => {

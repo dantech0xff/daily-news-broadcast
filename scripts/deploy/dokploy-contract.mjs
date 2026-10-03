@@ -49,13 +49,24 @@ export const DOKPLOY_CALLS = Object.freeze({
     fields: ['applicationId', 'buildType', 'dockerfile', 'dockerContextPath'],
     optional: ['dockerBuildStage', 'herokuVersion', 'railpackVersion', 'publishDirectory', 'isStaticSpa'],
   },
-  'application.saveDockerProvider': { method: 'POST', fields: ['applicationId', 'dockerImage'], optional: ['username', 'password', 'registryUrl'] },
   'application.saveEnvironment': { method: 'POST', fields: ['applicationId', 'env'], optional: ['buildArgs', 'buildSecrets', 'createEnvFile'] },
   'mounts.create': { method: 'POST', fields: ['type', 'volumeName', 'mountPath', 'serviceId'], optional: ['serviceType'] },
+  // The app's Traefik route; Dokploy rewrites the Traefik configuration on create and update.
+  'domain.byApplicationId': { method: 'GET', fields: ['applicationId'] },
+  'domain.create': {
+    method: 'POST',
+    fields: ['host', 'path', 'port', 'https', 'certificateType', 'applicationId', 'domainType', 'stripPath'],
+  },
+  'domain.update': {
+    method: 'POST',
+    fields: ['domainId', 'host', 'path', 'port', 'https', 'certificateType', 'domainType', 'stripPath'],
+    // Re-enables a domain switched off in Dokploy, where the instance has the switch.
+    optional: ['enabled'],
+  },
   'application.update': {
     method: 'POST',
     fields: [
-      'applicationId', 'replicas', 'args',
+      'applicationId', 'replicas',
       'updateConfigSwarm.Parallelism', 'updateConfigSwarm.Order',
       'healthCheckSwarm.Test', 'healthCheckSwarm.Interval', 'healthCheckSwarm.Timeout', 'healthCheckSwarm.Retries',
     ],
