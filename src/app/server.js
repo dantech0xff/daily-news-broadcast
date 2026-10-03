@@ -28,6 +28,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import net from 'node:net';
 import { pathToFileURL } from 'node:url';
 
 import { sanitizeRuntimeError } from '../channels/runner.js';
@@ -45,6 +46,16 @@ import { SecretVault, VaultKeyError } from './secrets/vault.js';
 
 /** Time open connections get to finish after the server stops accepting new ones. */
 export const SERVER_CLOSE_GRACE_MS = 5_000;
+
+/**
+ * Least time each address of a host gets to accept a connection before Node
+ * moves on to the next one (`autoSelectFamily`). Node's 250 ms default is
+ * shorter than the TCP handshake from the VPS to api.telegram.org (about
+ * 260 ms): the attempt was cut short, the IPv6 address that came next failed
+ * at once in a container without IPv6, and every send ended in `fetch failed`
+ * (ETIMEDOUT) although Telegram was reachable.
+ */
+export const MIN_CONNECT_ATTEMPT_TIMEOUT_MS = 2_500;
 
 const PACKAGE_JSON_URL = new URL('../../package.json', import.meta.url);
 const SHUTDOWN_SIGNALS = Object.freeze(['SIGTERM', 'SIGINT']);
@@ -196,6 +207,21 @@ export async function startServer(env = process.env, dependencies = {}) {
 }
 
 /**
+ * Raise the process-wide per-address connection attempt timeout, which every
+ * outbound connection uses (fetch included), to at least
+ * {@link MIN_CONNECT_ATTEMPT_TIMEOUT_MS}. A larger value set with
+ * `--network-family-autoselection-attempt-timeout` is kept.
+ * @param {Pick<typeof net, 'getDefaultAutoSelectFamilyAttemptTimeout'|'setDefaultAutoSelectFamilyAttemptTimeout'>} [netApi]
+ * @returns {number} The timeout in effect, in milliseconds.
+ */
+export function raiseConnectAttemptTimeout(netApi = net) {
+  if (netApi.getDefaultAutoSelectFamilyAttemptTimeout() < MIN_CONNECT_ATTEMPT_TIMEOUT_MS) {
+    netApi.setDefaultAutoSelectFamilyAttemptTimeout(MIN_CONNECT_ATTEMPT_TIMEOUT_MS);
+  }
+  return netApi.getDefaultAutoSelectFamilyAttemptTimeout();
+}
+
+/**
  * Describe a startup failure for the console without leaking values.
  * @param {unknown} error
  * @returns {string}
@@ -319,6 +345,7 @@ const isExecutable = process.argv[1]
 
 if (isExecutable) {
   await loadEnvironment();
+  raiseConnectAttemptTimeout();
   try {
     await startServer();
   } catch (error) {
