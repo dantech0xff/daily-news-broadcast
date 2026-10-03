@@ -74,7 +74,16 @@ export function createReporter({ stdout, stderr, redactor }) {
  */
 export function createRunContext({ config, deps, redactor, report }) {
   const planner = createPlanner({ dryRun: config.dryRun, report });
-  const dokploy = createDokployClient({ baseUrl: config.dokploy.url, apiKey: config.dokploy.apiKey, fetch: deps.fetch, planner, redactor });
+  const dokploy = createDokployClient({
+    baseUrl: config.dokploy.url,
+    apiKey: config.dokploy.apiKey,
+    // Only a panel behind Cloudflare Access gets the service token; otherwise
+    // its secret goes to the app alone.
+    accessServiceToken: config.dokploy.behindAccess ? config.serviceToken : undefined,
+    fetch: deps.fetch,
+    planner,
+    redactor,
+  });
   const cloudflare = config.cloudflare.apiToken
     ? createCloudflareClient({ apiToken: config.cloudflare.apiToken, fetch: deps.fetch, planner, redactor })
     : null;

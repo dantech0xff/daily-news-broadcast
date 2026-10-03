@@ -100,7 +100,8 @@ const IMAGE_REFERENCE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z
  * @property {'preflight'|'deploy'|'verify'} command
  * @property {boolean} dryRun
  * @property {boolean} redeployCheck
- * @property {{ url: string, apiKey: string }} dokploy `apiKey` is non-enumerable.
+ * @property {{ url: string, apiKey: string, behindAccess: boolean }} dokploy `apiKey` is non-enumerable;
+ *   `behindAccess` (from `DOKPLOY_BEHIND_ACCESS`) sends the Access service-token headers to the Dokploy API.
  * @property {{ apiToken: string, accountId: string, zoneId: string }} cloudflare `apiToken` is non-enumerable.
  * @property {string} hostname Lowercase FQDN served through the tunnel.
  * @property {string[]} operatorEmails Lowercase, unique.
@@ -137,8 +138,11 @@ export function readDeployConfig(env, { command, flags = {} }) {
   const required = command === 'verify' ? VERIFY_VARIABLES : DEPLOY_VARIABLES;
   const missing = required.filter(name => read(name) === '');
   if (missing.length > 0) problems.push(`Missing environment variables: ${missing.join(', ')}.`);
-  if (command !== 'verify' && read('CF_ACCESS_CLIENT_SECRET') === '') {
-    warnings.push('CF_ACCESS_CLIENT_SECRET is not set: the deploy does not need it, but the verify command does.');
+  const dokployBehindAccess = readBooleanFlag(read('DOKPLOY_BEHIND_ACCESS'), 'DOKPLOY_BEHIND_ACCESS', problems);
+  if (dokployBehindAccess && read('CF_ACCESS_CLIENT_SECRET') === '') {
+    problems.push('DOKPLOY_BEHIND_ACCESS=true needs CF_ACCESS_CLIENT_SECRET: the Dokploy API is reached through Cloudflare Access with the CF_ACCESS_CLIENT_ID service token.');
+  } else if (command !== 'verify' && read('CF_ACCESS_CLIENT_SECRET') === '') {
+    warnings.push('CF_ACCESS_CLIENT_SECRET is not set: the deploy does not need it unless DOKPLOY_BEHIND_ACCESS=true, but the verify command does.');
   }
 
   const dokployUrl = read('DOKPLOY_URL') ? readDokployUrl(read('DOKPLOY_URL'), problems) : null;
@@ -181,7 +185,7 @@ export function readDeployConfig(env, { command, flags = {} }) {
     command,
     dryRun: flags['dry-run'] === true,
     redeployCheck: flags['redeploy-check'] === true,
-    dokploy: { url: dokployUrl },
+    dokploy: { url: dokployUrl, behindAccess: dokployBehindAccess },
     cloudflare: { accountId, zoneId },
     hostname,
     operatorEmails,
@@ -250,6 +254,13 @@ export function compareVersions(left, right) {
 
 function stringFlag(value) {
   return typeof value === 'string' ? value.trim() : undefined;
+}
+
+function readBooleanFlag(value, name, problems) {
+  if (value === '' || /^(false|0|no)$/i.test(value)) return false;
+  if (/^(true|1|yes)$/i.test(value)) return true;
+  problems.push(`${name} must be true or false.`);
+  return false;
 }
 
 function readDokployUrl(value, problems) {

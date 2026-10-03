@@ -103,6 +103,37 @@ test('verify passes on a protected deployment and sends the service token only t
   assertNoSecrets(result.output);
 });
 
+test('with DOKPLOY_BEHIND_ACCESS the service token also reaches Dokploy, never the Cloudflare API', async () => {
+  const env = deployEnv({ DOKPLOY_BEHIND_ACCESS: 'true' });
+  const platform = createFakePlatform();
+  const deploy = await runScript(['deploy'], { platform, env });
+  assert.equal(deploy.code, 0, deploy.output);
+  const result = await runScript(['verify'], {
+    platform,
+    env,
+    probeOrigin: async options => ({ address: options.address, status: 404, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: '404 page not found\n' }),
+    lookup: async () => FAKE.originIp,
+  });
+  assert.equal(result.code, 0, result.output);
+  for (const run of [deploy, result]) {
+    const dokployCalls = run.calls.filter(call => call.service === 'dokploy');
+    assert.ok(dokployCalls.length > 0);
+    for (const call of dokployCalls) assert.equal(call.headers['cf-access-client-secret'], FAKE.clientSecret);
+    for (const call of run.calls.filter(entry => entry.service !== 'app' && entry.service !== 'dokploy')) {
+      assert.equal(JSON.stringify(call.headers).includes(FAKE.clientSecret), false, 'the service token secret never goes to the Cloudflare API');
+    }
+    assertNoSecrets(run.output);
+  }
+});
+
+test('DOKPLOY_BEHIND_ACCESS without the service token secret is refused before any call', async () => {
+  const env = deployEnv({ DOKPLOY_BEHIND_ACCESS: 'true', CF_ACCESS_CLIENT_SECRET: '' });
+  const result = await runScript(['preflight'], { platform: createFakePlatform(), env });
+  assert.notEqual(result.code, 0);
+  assert.match(result.output, /DOKPLOY_BEHIND_ACCESS=true needs CF_ACCESS_CLIENT_SECRET/);
+  assert.deepEqual(result.calls, []);
+});
+
 test('verify fails when the app answers anonymous requests or the origin serves it', async () => {
   const platform = await deployed();
   const leaky = createFakePlatform({

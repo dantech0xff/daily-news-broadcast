@@ -74,25 +74,33 @@ export function createPlanner({ dryRun, report }) {
 /**
  * Dokploy REST API: `GET /api/<router>.<procedure>?…` for queries and
  * `POST /api/<router>.<procedure>` with a JSON body for mutations,
- * authenticated with `x-api-key`.
+ * authenticated with `x-api-key`. When the panel itself sits behind
+ * Cloudflare Access, `accessServiceToken` adds the service-token headers so
+ * Access lets the request through to Dokploy's own API-key check.
  * @param {{
  *   baseUrl: string,
  *   apiKey: string,
  *   fetch: typeof fetch,
  *   planner: ReturnType<typeof createPlanner>,
  *   redactor: import('./redaction.mjs').Redactor,
+ *   accessServiceToken?: { clientId: string, clientSecret: string },
  *   timeoutMs?: number,
  * }} options
  */
-export function createDokployClient({ baseUrl, apiKey, fetch, planner, redactor, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+export function createDokployClient({
+  baseUrl, apiKey, fetch, planner, redactor, accessServiceToken, timeoutMs = DEFAULT_TIMEOUT_MS,
+}) {
   const apiBase = `${baseUrl}/api`;
+  const accessHeaders = accessServiceToken?.clientId && accessServiceToken?.clientSecret
+    ? { 'CF-Access-Client-Id': accessServiceToken.clientId, 'CF-Access-Client-Secret': accessServiceToken.clientSecret }
+    : {};
 
   async function send(method, procedure, { query, body } = {}) {
     const url = new URL(`${apiBase}/${procedure}`);
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     }
-    const headers = { 'x-api-key': apiKey, accept: 'application/json' };
+    const headers = { 'x-api-key': apiKey, accept: 'application/json', ...accessHeaders };
     if (body !== undefined) headers['content-type'] = 'application/json';
     const fail = (status, detail) => new ApiError({ service: 'Dokploy', method, target: procedure, status, detail: redactor.redact(detail) });
     let response;
@@ -105,7 +113,8 @@ export function createDokployClient({ baseUrl, apiKey, fetch, planner, redactor,
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      throw fail(null, describeFetchError(error, timeoutMs));
+      const detail = describeFetchError(error, timeoutMs);
+      throw fail(null, /redirect/i.test(detail) ? `${detail}; ${DOKPLOY_REDIRECT_HINT}` : detail);
     }
     const text = await response.text();
     const data = parseJson(text);
@@ -230,6 +239,13 @@ export function createCloudflareClient({ apiToken, fetch, planner, redactor, bas
  * @param {number} timeoutMs
  * @returns {string}
  */
+// A redirect from the Dokploy API almost always means the panel's hostname is
+// protected by Cloudflare Access and the request was sent to its login page.
+const DOKPLOY_REDIRECT_HINT = 'if the Dokploy panel is behind Cloudflare Access, add a Service Auth policy '
+  + 'that includes the CF_ACCESS_CLIENT_ID service token to the Access application of the Dokploy host and '
+  + 'set DOKPLOY_BEHIND_ACCESS=true (with CF_ACCESS_CLIENT_SECRET); otherwise check that DOKPLOY_URL is the '
+  + 'final https URL of the panel';
+
 export function describeFetchError(error, timeoutMs) {
   if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return `no response within ${Math.round(timeoutMs / 1000)} s`;
   const cause = error?.cause;
