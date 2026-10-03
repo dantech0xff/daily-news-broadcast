@@ -23,7 +23,7 @@ Cloudflare Worker ─> ChannelDeliveryCoordinator (Durable Object) builds its en
                ContentRadar -> DeliveryStateMachine -> delivery store -> output plugins
 ```
 
-Target deployment of the dashboard app (planned; see `docs/deployment.md`):
+Deployment of the dashboard app (live since 2026-10-03; see `docs/deployment.md`):
 
 ```text
 Browser ──HTTPS──> Cloudflare Access ──> Cloudflare Tunnel ──> Dokploy application (1 container)

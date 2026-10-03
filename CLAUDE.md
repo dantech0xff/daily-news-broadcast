@@ -8,8 +8,8 @@
 
 Three runtimes share the engine:
 
-- **Dashboard app** (`src/app/` + `web/`) — one Node process: React dashboard, API, channel scheduler, and SQLite. Telegram channels, sources, prompts, AI providers, and encrypted credentials are configured in the dashboard without a redeploy. It is the target primary engine, deployed on Dokploy behind Cloudflare Tunnel + Access. **Production cutover has not happened yet** (`docs/deployment.md`).
-- **Cloudflare Worker** `news-engine` — the current production runtime; its `telegram-main` channel is paused, not deleted, at cutover so it stays available for rollback.
+- **Dashboard app** (`src/app/` + `web/`) — one Node process: React dashboard, API, channel scheduler, and SQLite. Telegram channels, sources, prompts, AI providers, and encrypted credentials are configured in the dashboard without a redeploy. It is the primary engine, deployed on Dokploy behind Cloudflare Tunnel + Access; the production cutover happened on 2026-10-03 (`docs/deployment.md`).
+- **Cloudflare Worker** `news-engine` — the previous production runtime; its `telegram-main` channel was paused, not deleted, at the cutover so it stays available for rollback.
 - **Node CLI** (`src/adapters/node.js`) — channels from environment variables. Telegram is active today; X, Facebook, and Threads exist and activate once their environment variables are configured.
 
 This is NOT a monolithic app. It's a **composable engine** with a plugin registry pattern; the runtimes are thin layers around it.

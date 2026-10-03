@@ -5,10 +5,10 @@ Content Radar scans technology content from swappable sources, filters it for te
 It has three runtimes that share one engine (`src/core`) and one delivery state machine:
 
 - **Dashboard app** (`src/app/` + `web/`): one Node process that serves a React dashboard and its API, schedules channels, and keeps everything in SQLite. Telegram channels, sources, prompts, AI providers, and encrypted credentials are configured in the dashboard, so changes need no redeploy. It is the target primary engine, deployed on Dokploy behind Cloudflare Tunnel and Cloudflare Access.
-- **Cloudflare Worker** `news-engine` (`src/adapters/cloudflare.js`): the current production runtime. Its code and Durable Object state are kept; at cutover its `telegram-main` channel is paused, not deleted, so it remains a rollback path.
+- **Cloudflare Worker** `news-engine` (`src/adapters/cloudflare.js`): the previous production runtime. Its code and Durable Object state are kept; its `telegram-main` channel was paused, not deleted, at the 2026-10-03 cutover, so it remains a rollback path.
 - **Node CLI** (`src/adapters/node.js`): manual runs, a cron daemon, read-only previews, and recovery commands for channels defined in environment variables. Telegram is active by default; X, Facebook, and Threads outputs exist and turn on once their channel-specific environment variables are set.
 
-**Production cutover has not happened yet.** The Dokploy deployment and the cutover and rollback runbooks are in [docs/deployment.md](./docs/deployment.md).
+**Production cutover happened on 2026-10-03:** the dashboard app at `https://radar.dantech.academy` is now the only engine posting to `telegram-main`. The Dokploy deployment, the cutover record, and the rollback runbook are in [docs/deployment.md](./docs/deployment.md).
 
 Delivery model, in every runtime:
 

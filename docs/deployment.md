@@ -4,8 +4,8 @@ Two deployments matter:
 
 | Target | Status |
 |---|---|
-| Cloudflare Worker `news-engine` | Deployed; the current production runtime. Observed in `bootstrap` mode on 2026-10-03, so it is not posting on schedule. |
-| Dashboard app on Dokploy behind Cloudflare Tunnel + Access | **Planned, not deployed.** The cutover that makes it the only engine for `telegram-main` has not happened. |
+| Cloudflare Worker `news-engine` | Still deployed in `bootstrap` mode, kept for rollback. Its `telegram-main` channel was paused at the cutover (channel version 544, 2026-10-03T14:03:30Z). |
+| Dashboard app on Dokploy behind Cloudflare Tunnel + Access | **Deployed 2026-10-03** at `https://radar.dantech.academy`. Since the cutover (`notBefore` 2026-10-03T14:03:41.986Z) it is the only engine posting to `telegram-main`. |
 
 Secrets are only ever passed through environment variables. Never print them, paste them into chat, or write them to files, logs, docs, or pull requests.
 
@@ -20,7 +20,7 @@ The Worker no longer matches the 2026-08-08 recovery snapshot further down:
 - `GET /health` reports `status: "ok"`, `runtimeMode: "bootstrap"` (not `active`), build `cloudflare-aig-compat-byok-20260729`, and one channel.
 - `GET /status?channel=telegram-main` (trigger secret, read during the 2026-10-03 preflight) reported `paused=false`, `mutationState=blocked_ambiguous`, and channel version `543`.
 - The Worker is therefore **not posting on schedule**: `scheduled()` returns immediately unless the runtime mode is `active`, and `bootstrap` serves only health, status, queue, and `/control/pause`. The ambiguous item behind `blocked_ambiguous` would also hold delivery until an operator reconciles it.
-- The channel itself is still unpaused in its Durable Object, so a later `active` deploy would start posting again. The cutover below pauses it explicitly first.
+- The channel itself was still unpaused in its Durable Object, so a later `active` deploy would have started posting again. The cutover paused it explicitly: after the cutover `/status` reports `paused=true`, channel version `544`, still `bootstrap` and `blocked_ambiguous`.
 
 The rest of this section records how production got here. The dated snapshots are historical.
 
@@ -146,9 +146,37 @@ npx wrangler rollback 0ccd198e-4f99-49dd-8aa1-1c2fcadfce4b \
 
 Never roll back to a version from before the Durable Object class creation. If the captured bootstrap version is unavailable, stop and fix forward from the checksum-verified post-lifecycle artifact; do not rebuild an emergency rollback from a dirty working tree.
 
-## Dokploy + Cloudflare (planned)
+## Dokploy + Cloudflare
 
-> **Status: planned, not deployed.** This section is the target design. Application IDs, verification output, and the cutover record are added here when the deployment and cutover happen.
+> **Status: deployed 2026-10-03** with `scripts/deploy/dokploy-cloudflare.mjs` (no manual clicks). Re-running it is safe: it looks resources up by name, changes only what differs, reuses the existing `APP_MASTER_KEY`, and redeploys the app to pick up new commits.
+
+| Resource | Value |
+|---|---|
+| Public hostname | `https://radar.dantech.academy` (proxied CNAME to the tunnel) |
+| Access | Team domain `small-unit-70a7.cloudflareaccess.com`; self-hosted application "Content Radar" with the reusable policies `content-radar-users` (allow, operator + viewer emails) and `content-radar-agent-service-token` (`non_identity`, the agent service token); one-time PIN login method |
+| Dokploy | v0.30.8; project `content-radar`; application `content-radar` (service `content-radar-lm6hl8` on `dokploy-network`), volume `content-radar-data` at `/data`, 1 replica, `stop-first`, stop grace 135 s, health check `/healthz` |
+| Tunnel | `content-radar` (`c93bf8ce-a77d-4e8b-9f8e-40374af8bbef`), run by the Dokploy application `content-radar-cloudflared` (`cloudflare/cloudflared:2026.9.3`) |
+| Source branch | `feat/dokploy-dashboard`; switch the Dokploy source to `master` once the pull request is merged |
+
+The Dokploy panel (`deploy.dantech.academy`) is itself behind Cloudflare Access. To let the deploy script reach its API, the panel's Access application "Dokploy dashboard" also carries the `content-radar-agent-service-token` policy (added 2026-10-03, its existing email policy unchanged), and the operator environment sets `DOKPLOY_BEHIND_ACCESS=true`, which sends the service-token headers to the Dokploy API as well as the app — never to the Cloudflare API.
+
+Commands (credentials come from the operator's environment or `.env`; values are never printed):
+
+```bash
+npm run deploy:preflight
+```
+
+```bash
+npm run deploy:dokploy
+```
+
+```bash
+npm run deploy:verify -- --origin-ip <vps-ip> --redeploy-check
+```
+
+`--origin-ip` is needed because the Dokploy panel's own DNS name resolves to Cloudflare; use the origin address of the proxied A records and keep it out of the repository. Verification on 2026-10-03 passed 10/10: anonymous requests got a 302 to the Access login, the service token got `/api/health` 200 with the runtime lease held, `telegram-main` was paused with `cutoverRequired`, the origin answered Traefik's 404 for the hostname, there was no Traefik domain or published port, one replica with `stop-first`, and a redeploy kept the channel (same `createdAt`) with a single running instance. The first verification run hit a 503 on its first request because the container's first JWKS fetch exceeded jose's 5 s default; the app now allows 15 s and loads the keys right after it starts listening.
+
+After the first deploy, copy `APP_MASTER_KEY` from the Environment tab of the Dokploy application `content-radar` into a password manager.
 
 ```text
 Browser ──HTTPS──> Cloudflare Access (email login or service token)
@@ -212,9 +240,18 @@ The deploy needs these in the operator's environment: `DOKPLOY_URL` and `DOKPLOY
 
 Backups: the app writes `VACUUM INTO` snapshots to `/data/backups/` before schema migrations. Off-site volume backups (Dokploy Volume Backups to S3 or R2) are not set up.
 
-## Cutover Runbook (planned)
+## Cutover Runbook
 
 Goal: the dashboard app becomes the only engine posting to the `telegram-main` chat. The Worker and the app must never be active on the same chat: pause the Worker, verify, and only then resume the app.
+
+**Cutover record (2026-10-03).** The user signed in through Access, entered the bot token, chat ID, and a Gemini API key in the dashboard (the app's `telegram-main` calls Gemini directly, without AI Gateway), and approved the cutover. Then, with the commands below:
+
+- `npm run cutover:preview` (A4): 5 texts generated with Gemini, 24 of 33 sources healthy, nothing delivered, delivery-state version unchanged.
+- `npm run cutover:pause-worker -- --confirm`: Worker `telegram-main` paused at channel version 544 (2026-10-03T14:03:30Z).
+- `npm run cutover:activate -- --confirm`: `notBefore` set to 2026-10-03T14:03:41.986Z (config version 3), app channel resumed (delivery-state version 3), Worker re-checked and still paused.
+- `npm run -s cutover:check` (A5, polled about hourly for up to 24 h): exits 0 once a delivered post with a Telegram message ID exists and every delivered article was published at or after `notBefore`, 2 while nothing is delivered yet, and 1 on any violation.
+
+The commands read their settings from the environment or `.env` (`TRIGGER_SECRET`, `OPERATOR_SECRET`, `APP_HOSTNAME`, `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`), refuse every change without `--confirm`, and never print secrets.
 
 **Gate.** All of these, in order:
 
@@ -235,8 +272,8 @@ Goal: the dashboard app becomes the only engine posting to the `telegram-main` c
 
 Record here once done: the cutover time, the Worker channel version after the pause, and the first delivery and message IDs. No secrets.
 
-## Rollback Runbook (planned)
+## Rollback Runbook
 
-1. Pause `telegram-main` on the app: the dashboard, or `POST /api/channels/telegram-main/control/pause`, which never needs the runtime lease. To take the dashboard offline as well, stop the Dokploy application or delete the DNS record; the channel stays paused.
+1. Pause `telegram-main` on the app: `npm run cutover:rollback -- --confirm`, the dashboard, or `POST /api/channels/telegram-main/control/pause`, which never needs the runtime lease. To take the dashboard offline as well, stop the Dokploy application or delete the DNS record; the channel stays paused.
 2. Only if the Worker should post again: it runs in `bootstrap` mode, where `/control/resume` is refused (only pause is accepted), and its `telegram-main` is `blocked_ambiguous`. It would post only after being redeployed in `active` mode and having the ambiguous item reconciled, which is outside this rollout and needs a user decision. After that, resume it with `POST /control/resume` (a new `Idempotency-Key`, the current `expectedVersion`, and a reason).
 3. Never let both run active on the same chat.
