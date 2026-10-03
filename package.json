@@ -20,6 +20,7 @@
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
     "test:web": "npm --prefix web run typecheck && npm --prefix web test",
+    "test:e2e": "npm run web:build && playwright test",
     "test": "npm run test:node && npm run test:workers",
     "test:node": "node tests/run-node-tests.js",
     "test:workers": "vitest run --config vitest.config.js"
@@ -35,6 +36,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.18.6",
+    "@playwright/test": "1.63.0",
     "vitest": "4.1.10",
     "wrangler": "4.112.0"
   },
