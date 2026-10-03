@@ -26,14 +26,16 @@ Cloudflare Worker ─> ChannelDeliveryCoordinator (Durable Object) builds its en
 Deployment of the dashboard app (live since 2026-10-03; see `docs/deployment.md`):
 
 ```text
-Browser ──HTTPS──> Cloudflare Access ──> Cloudflare Tunnel ──> Dokploy application (1 container)
-                                                                 src/app/server.js
-                                                                 ├─ /api/*   Access JWT → role → routes
-                                                                 ├─ /*       web/dist (React UI), JWT required
-                                                                 ├─ /healthz liveness, no data
-                                                                 ├─ scheduler (lease) → channel runs
-                                                                 └─ /data volume: content-radar.db, backups/, news.json
+Browser ──HTTPS──> Cloudflare Access ──> Dokploy's Traefik (VPS, 443) ──> Dokploy application (1 container)
+                                                                         src/app/server.js
+                                                                         ├─ /api/*   Access JWT → role → routes
+                                                                         ├─ /*       web/dist (React UI), JWT required
+                                                                         ├─ /healthz liveness, no data
+                                                                         ├─ scheduler (lease) → channel runs
+                                                                         └─ /data volume: content-radar.db, backups/, news.json
 ```
+
+Traefik also answers requests sent straight to the VPS address, so the app's own Access JWT check on every route except `/healthz` is what stops a request that skips Cloudflare. The server raises Node's per-address connection attempt timeout to 2.5 s at startup: with the 250 ms default, connections to hosts more than about 250 ms away (api.telegram.org from the VPS) were cut short and failed.
 
 ## Core Pipeline
 

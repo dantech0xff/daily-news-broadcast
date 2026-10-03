@@ -4,7 +4,7 @@
 
 Content Radar is a plugin-based engine that actively scans technology content from swappable sources, filters it for technology relevance, summarizes it with a configurable AI provider, and sends the result through swappable outputs. The current implementation is delivery-state driven: content generation, output sending, recovery, and maintenance replay all flow through a durable state machine.
 
-The target primary runtime is the dashboard app: one Node process (React dashboard, API, scheduler, SQLite) deployed on Dokploy behind Cloudflare Tunnel and Cloudflare Access, where operators manage Telegram channels without redeploying. The Cloudflare Worker remains the production runtime until the approved cutover, after which its channel is paused and kept for rollback.
+The primary runtime is the dashboard app: one Node process (React dashboard, API, scheduler, SQLite) deployed on Dokploy and served by Dokploy's Traefik behind Cloudflare Access, where operators manage Telegram channels without redeploying. Since the cutover on 2026-10-03 the Cloudflare Worker's channel is paused and the Worker is kept for rollback.
 
 ## Product Goal
 
