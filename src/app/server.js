@@ -33,7 +33,7 @@ import { pathToFileURL } from 'node:url';
 import { sanitizeRuntimeError } from '../channels/runner.js';
 import { FileCache } from '../core/caches.js';
 import { SQLiteDeliveryStore } from '../core/sqlite-delivery-store.js';
-import { createAccessKeySet, createAccessVerifier } from './auth/access-jwt.js';
+import { createAccessKeySet, createAccessVerifier, warmUpAccessKeySet } from './auth/access-jwt.js';
 import { createRoleResolver } from './auth/roles.js';
 import { AppConfigError, STOP_GRACE_MARGIN_SECONDS, loadAppConfig } from './config/env.js';
 import { createApp } from './create-app.js';
@@ -159,6 +159,8 @@ export async function startServer(env = process.env, dependencies = {}) {
       sseHeartbeatMs: dependencies.sseHeartbeatMs,
     }));
     server = await listen(app, config.host, config.port);
+    // Not awaited: startup must not depend on reaching Cloudflare.
+    warmUpAccessKeySet(keySet, { logger }).catch(() => {});
     const { leased } = await runtime.start();
     logger.log?.(`[App] Listening on ${baseUrl(server)} (public origin ${config.publicOrigin}; Access keys from ${config.access.jwksFile ? 'the local ACCESS_JWKS_FILE' : config.access.certsUrl})`);
     logger.log?.(`[App] On SIGTERM a run in flight is awaited (shutdown wait ${describeSeconds(shutdownWaitMs)}, SHUTDOWN_WAIT_SECONDS); give the container a stop grace period of at least ${describeSeconds(shutdownWaitMs + STOP_GRACE_MARGIN_SECONDS * 1_000)}`);

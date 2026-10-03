@@ -12,6 +12,7 @@ import {
   createAccessKeySet,
   createAccessVerifier,
   readAccessToken,
+  warmUpAccessKeySet,
 } from '../../src/app/auth/access-jwt.js';
 import { actorFor, createRoleResolver, hasRole, identityFromClaims } from '../../src/app/auth/roles.js';
 import {
@@ -192,4 +193,34 @@ test('roles map emails and service tokens; operator includes viewer; unmapped ha
 
   assert.equal(actorFor({ type: 'user', email: 'ops@example.test' }), 'ops@example.test');
   assert.equal(actorFor({ type: 'service', clientId: 'agent.access' }), 'service:agent.access');
+});
+
+test('the remote key set is warmed up in the background and retries without throwing', async () => {
+  const logs = [];
+  const logger = { log: line => logs.push(line), warn: line => logs.push(line) };
+  const sleeps = [];
+  const sleep = async ms => { sleeps.push(ms); };
+
+  let calls = 0;
+  const flaky = Object.assign(() => {}, {
+    reload: async () => {
+      calls += 1;
+      if (calls < 3) throw Object.assign(new Error('timed out'), { code: 'ERR_JWKS_TIMEOUT' });
+    },
+  });
+  assert.equal(await warmUpAccessKeySet(flaky, { logger, sleep }), true);
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [2_000, 4_000]);
+  assert.match(logs.join('\n'), /attempt 1\/3\): ERR_JWKS_TIMEOUT/);
+  assert.match(logs.at(-1), /signing keys loaded/);
+
+  const down = Object.assign(() => {}, { reload: async () => { throw new Error('offline'); } });
+  assert.equal(await warmUpAccessKeySet(down, { logger, sleep }), false);
+
+  assert.equal(await warmUpAccessKeySet(() => {}, { logger, sleep }), false, 'a local key set needs no warm-up');
+});
+
+test('the remote key set allows slow first fetches and exposes reload for warm-up', async () => {
+  const keySet = await createAccessKeySet({ certsUrl: 'https://team.example.invalid/cdn-cgi/access/certs' });
+  assert.equal(typeof keySet.reload, 'function');
 });

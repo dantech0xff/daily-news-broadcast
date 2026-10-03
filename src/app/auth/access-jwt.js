@@ -138,7 +138,40 @@ export function createAccessVerifier({
 export async function createAccessKeySet(access) {
   if (access?.jwksFile) return createLocalJWKSet(await readJwksFile(access.jwksFile));
   if (typeof access?.certsUrl !== 'string') throw new TypeError('Access key set requires a JWKS URL');
-  return createRemoteJWKSet(new URL(access.certsUrl));
+  // A container's first outbound HTTPS request (DNS + TLS) can exceed jose's
+  // 5 s default, which made the first request after a deploy answer 503.
+  return createRemoteJWKSet(new URL(access.certsUrl), { timeoutDuration: REMOTE_JWKS_TIMEOUT_MS });
+}
+
+export const REMOTE_JWKS_TIMEOUT_MS = 15_000;
+const WARM_UP_ATTEMPTS = 3;
+const WARM_UP_RETRY_MS = 2_000;
+
+/**
+ * Fetch the remote signing keys once in the background so the first request
+ * does not wait for them. Failures are logged, never thrown: verification
+ * fetches the keys again on demand.
+ * @param {import('jose').JWTVerifyGetKey & { reload?: () => Promise<void> }} keySet
+ * @param {{ logger?: Pick<Console, 'log'|'warn'>, sleep?: (ms: number) => Promise<void> }} [options]
+ * @returns {Promise<boolean>} Whether the keys were loaded.
+ */
+export async function warmUpAccessKeySet(keySet, {
+  logger = console,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms).unref?.()),
+} = {}) {
+  if (typeof keySet?.reload !== 'function') return false;
+  for (let attempt = 1; attempt <= WARM_UP_ATTEMPTS; attempt++) {
+    try {
+      await keySet.reload();
+      logger.log?.('[Auth] Cloudflare Access signing keys loaded');
+      return true;
+    } catch (error) {
+      const code = typeof error?.code === 'string' ? error.code : String(error?.name ?? 'Error');
+      logger.warn?.(`[Auth] Loading Cloudflare Access signing keys failed (attempt ${attempt}/${WARM_UP_ATTEMPTS}): ${code}`);
+      if (attempt < WARM_UP_ATTEMPTS) await sleep(WARM_UP_RETRY_MS * attempt);
+    }
+  }
+  return false;
 }
 
 /**
