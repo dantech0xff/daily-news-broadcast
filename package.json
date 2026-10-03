@@ -13,12 +13,16 @@
     "docker:run": "docker compose up -d",
     "dashboard": "node src/dashboard/server.js",
     "dashboard:dev": "node --watch src/dashboard/server.js",
+    "app": "node src/app/server.js",
+    "app:dev": "node --watch src/app/server.js",
+    "dev:token": "node scripts/dev-access-token.mjs",
     "test": "npm run test:node && npm run test:workers",
     "test:node": "node tests/run-node-tests.js",
     "test:workers": "vitest run --config vitest.config.js"
   },
   "dependencies": {
     "express": "^5.2.1",
+    "jose": "^6.2.12",
     "node-cron": "^4.6.0"
   },
   "optionalDependencies": {

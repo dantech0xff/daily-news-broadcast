@@ -21,8 +21,10 @@ export const DEFAULT_CONTENT_SCAN_RETENTION_DAYS = 30;
 export const DEFAULT_RUN_HISTORY_RETENTION_DAYS = 180;
 export const RETENTION_LAST_RUN_SETTING = 'runtime.retention.last_run_at';
 
+/** Upper bound of both retention settings, in days. */
+export const MAX_RETENTION_DAYS = 3_650;
+
 const DAY_MS = 24 * 60 * 60 * 1_000;
-const MAX_RETENTION_DAYS = 3_650;
 
 export class RetentionJob {
   /**
