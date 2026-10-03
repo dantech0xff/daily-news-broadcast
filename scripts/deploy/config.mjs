@@ -27,7 +27,7 @@ export const NAMES = Object.freeze({
 
 export const DEFAULTS = Object.freeze({
   gitUrl: 'https://github.com/dantech0xff/daily-news-broadcast.git',
-  gitBranch: 'feat/dokploy-dashboard',
+  gitBranch: 'master',
   cloudflaredImage: 'cloudflare/cloudflared:2026.9.3',
   waitMinutes: 30,
 });
@@ -192,7 +192,7 @@ export function readDeployConfig(env, { command, flags = {} }) {
   const githubRepository = source === 'github' ? readGithubRepository(gitUrl, problems) : null;
   const gitBranch = stringFlag(flags['git-branch']) ?? DEFAULTS.gitBranch;
   if (!GIT_BRANCH.test(gitBranch) || gitBranch.includes('..') || gitBranch.startsWith('/') || gitBranch.endsWith('/')) {
-    problems.push('--git-branch must be a branch name such as feat/dokploy-dashboard or master.');
+    problems.push('--git-branch must be a branch name such as master or feat/my-change.');
   }
   const cloudflaredImage = stringFlag(flags['cloudflared-image']) ?? DEFAULTS.cloudflaredImage;
   const imageMatch = IMAGE_REFERENCE.exec(cloudflaredImage);

@@ -74,7 +74,7 @@ test('deploy creates everything in a safe order, and a second run creates nothin
   // Dokploy: source, build, volume; the tunnel goes straight to the service, with Access enforced by cloudflared.
   const main = platform.dokploy.applications.get(mainId);
   assert.equal(main.customGitUrl, 'https://github.com/dantech0xff/daily-news-broadcast.git');
-  assert.equal(main.customGitBranch, 'feat/dokploy-dashboard');
+  assert.equal(main.customGitBranch, 'master');
   assert.equal(main.buildType, 'dockerfile');
   assert.equal(main.dockerfile, 'Dockerfile');
   assert.equal(main.dockerContextPath, '.');

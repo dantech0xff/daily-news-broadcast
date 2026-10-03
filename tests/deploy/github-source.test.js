@@ -76,7 +76,7 @@ test('switching the live app from the public Git URL to the GitHub App tracks ma
   assert.equal(after.env, before.env);
   assert.deepEqual(after.mounts, before.mounts);
   assert.match(result.stdout, /Deploying radar\.example\.test \(branch master, GitHub App source\)/);
-  assert.match(result.stdout, /\[update\] Source → GitHub dantech0xff\/daily-news-broadcast branch master through the provider "Dokploy-2026-10-01-g7i5b9" \(was: git, branch feat\/dokploy-dashboard\)/);
+  assert.match(result.stdout, /\[update\] Source → GitHub dantech0xff\/daily-news-broadcast branch master through the provider "Dokploy-2026-10-01-g7i5b9" \(was: git, branch master\)/);
   assert.match(result.stdout, /\[ok\] Auto deploy is on: Dokploy deploys every push to master/);
   assertNoSecrets(dry);
   assertNoSecrets(result);
@@ -93,8 +93,14 @@ test('an app already on the GitHub source is saved again when any part drifts, n
   assert.equal((await runScript(MASTER, { platform, env: githubEnv() })).code, 0);
   const onMaster = sourceOf(mainApp(platform));
 
-  // Without --git-branch the default branch applies, as always, with a warning saying which pushes deploy now.
-  const moved = await runScript(['deploy'], { platform, env: githubEnv() });
+  // Without --git-branch the default branch (master) applies, so nothing moves.
+  const kept = await runScript(['deploy'], { platform, env: githubEnv() });
+  assert.equal(kept.code, 0, kept.output);
+  assert.equal(mainApp(platform).branch, 'master');
+  assert.doesNotMatch(kept.stderr, /The source moves from branch/);
+
+  // An explicit other branch moves the source, with a warning saying which pushes deploy now.
+  const moved = await runScript(['deploy', '--git-branch', 'feat/dokploy-dashboard'], { platform, env: githubEnv() });
   assert.equal(moved.code, 0, moved.output);
   assert.match(moved.stderr, /\[warn\] The source moves from branch master to feat\/dokploy-dashboard: from then on only pushes to feat\/dokploy-dashboard deploy\. To keep master, pass --git-branch master\./);
   assert.match(moved.stdout, /\(was: github, branch master\)/);
@@ -370,7 +376,7 @@ test('the GitHub procedures and the autoDeploy field are checked only in GitHub 
 test('config: DOKPLOY_SOURCE and DOKPLOY_GITHUB_PROVIDER are validated without echoing values', () => {
   const git = readDeployConfig(deployEnv(), { command: 'deploy', flags: {} });
   assert.deepEqual(git.config.git, {
-    url: 'https://github.com/dantech0xff/daily-news-broadcast.git', branch: 'feat/dokploy-dashboard',
+    url: 'https://github.com/dantech0xff/daily-news-broadcast.git', branch: 'master',
     source: 'git', githubProvider: null, owner: null, repository: null,
   });
 
