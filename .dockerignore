@@ -1,0 +1,27 @@
+# Build context of the app image (see Dockerfile). The image needs only
+# package.json, package-lock.json, src/, and the web/ sources; everything else
+# stays out, and secrets or local state must never reach the builder.
+
+# Secrets and local state (`.cache` holds the dev Access signing key).
+**/.env*
+**/.dev.vars
+**/.cache
+**/.wrangler
+.claude
+
+# Dependencies and build output are installed and built inside the image.
+**/node_modules
+web/dist
+
+# Not part of the runtime image.
+.git
+plans
+tests
+docs
+mnt
+streams.config.json
+repomix-output.*
+test-results
+playwright-report
+**/*.log
+**/.DS_Store

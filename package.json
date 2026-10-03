@@ -9,7 +9,7 @@
     "preview": "node src/adapters/node.js preview",
     "dev": "wrangler dev --config wrangler.toml",
     "deploy:cf": "wrangler deploy --config wrangler.toml",
-    "docker:build": "docker build -t news-engine .",
+    "docker:build": "docker build -t news-engine:local .",
     "docker:run": "docker compose up -d",
     "dashboard": "node src/dashboard/server.js",
     "dashboard:dev": "node --watch src/dashboard/server.js",
