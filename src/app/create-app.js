@@ -29,6 +29,7 @@ import { createCredentialRoutes } from './api/credential-routes.js';
 import { ApiError, createErrorHandler } from './api/errors.js';
 import { DEFAULT_SSE_HEARTBEAT_MS, createEventStreams } from './api/event-stream.js';
 import { createHealthRoutes, liveness } from './api/health-routes.js';
+import { createMetaRoutes } from './api/meta-routes.js';
 import {
   CHANNEL_JSON_LIMIT,
   DEFAULT_JSON_LIMIT,
@@ -98,6 +99,7 @@ export function createApp({
 
   const api = express.Router();
   api.use(createHealthRoutes({ runtime, version, clock, guards }));
+  api.use(createMetaRoutes({ guards }));
   api.use(createChannelRoutes({ runtime, guards }));
   api.use(createCredentialRoutes({ runtime, guards }));
   api.use(createOperationRoutes({ runtime, guards }));

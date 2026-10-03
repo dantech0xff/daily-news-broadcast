@@ -16,6 +16,10 @@
     "app": "node src/app/server.js",
     "app:dev": "node --watch src/app/server.js",
     "dev:token": "node scripts/dev-access-token.mjs",
+    "web:install": "npm --prefix web ci",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "test:web": "npm --prefix web run typecheck && npm --prefix web test",
     "test": "npm run test:node && npm run test:workers",
     "test:node": "node tests/run-node-tests.js",
     "test:workers": "vitest run --config vitest.config.js"
