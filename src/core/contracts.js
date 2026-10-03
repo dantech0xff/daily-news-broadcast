@@ -139,12 +139,13 @@ export class AIPlugin {
    *
    * @param {ReadonlyArray<Article>} articles
    * @param {Object} [options={}]
-   * @param {string}    [options.language='vi']   - Output luôn là tiếng Việt có dấu
+   * @param {string}    [options.language='vi']   - Output language: 'vi' (Vietnamese with diacritics) or 'en'; any other value falls back to 'vi'. Its output rules are always enforced.
    * @param {string}    [options.style='digest']  - Style: digest | hot_take | bullet | thread | newsletter | weekly | mustread
    * @param {string}    [options.platform='telegram'] - Platform formatting rules
    * @param {string}    [options.audience]
    * @param {'digest'|'drip'} [options.deliveryMode]
-   * @param {string}    [options.systemPrompt]    - Custom system prompt (override default)
+   * @param {string}    [options.customSystemPrompt] - Per-channel editorial instructions; replace only the style section and keep the language, source-data, and platform rules
+   * @param {string}    [options.systemPrompt]    - Legacy full system prompt override (the language output rules are still appended)
    * @param {number}    [options.maxTokens=4096]
    * @param {string}    [options.requestId]  - Opaque durable request identity when available
    * @param {string}    [options.deliveryId] - Opaque durable delivery identity when available

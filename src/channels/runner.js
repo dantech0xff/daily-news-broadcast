@@ -15,6 +15,7 @@ import {
 
 const TRIGGER_TYPES = new Set(['scheduled', 'manual', 'force']);
 const CRON_LIMITS = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+const DAY_OF_WEEK_FIELD = 4;
 const DELIVERY_RECOVERY_ACTIONS = Object.freeze({
   pending_generation: ['abandon'],
   generation_retry_pending: ['retry-generation', 'abandon'],
@@ -139,12 +140,12 @@ export function shouldRun(cronExpr, now, timezone = 'UTC') {
   const fields = cronExpr.trim().split(/\s+/);
   const vals = datePartsInTimezone(now, timezone);
 
-  return fields.every((field, i) => matchField(field, vals[i], CRON_LIMITS[i]));
+  return fields.every((field, i) => matchField(field, vals[i], CRON_LIMITS[i], i === DAY_OF_WEEK_FIELD));
 }
 
 /** Match a single cron field against a value */
-function matchField(field, value, limits) {
-  return field.split(',').some(part => matchCronPart(part, value, limits));
+function matchField(field, value, limits, dayOfWeek) {
+  return field.split(',').some(part => matchCronPart(part, value, limits, dayOfWeek));
 }
 
 /** Validate the supported five-field cron syntax without importing Node-only cron code. */
@@ -182,10 +183,12 @@ function validateCronPart(part, [minimum, maximum]) {
   return step === undefined && isIntegerInRange(range, minimum, maximum);
 }
 
-function matchCronPart(part, value, [minimum]) {
+function matchCronPart(part, value, [minimum], dayOfWeek) {
   const [range, rawStep] = part.split('/');
   const step = rawStep === undefined ? 1 : Number(rawStep);
-  const normalizedValue = value === 0 && range === '7' ? 7 : value;
+  // `7` is a second name for Sunday (0) in the day-of-week field only; a bare
+  // 7 in any other field must not match 0 (minute 0, midnight).
+  const normalizedValue = dayOfWeek && value === 0 && range === '7' ? 7 : value;
   if (range === '*') return (normalizedValue - minimum) % step === 0;
   if (range.includes('-')) {
     const [low, high] = range.split('-').map(Number);
@@ -215,17 +218,44 @@ function datePartsInTimezone(now, timezone) {
 }
 
 /**
+ * The default article selection chain every channel engine uses: the tech
+ * relevance gate, then scoring (top `maxArticles`), then semantic dedup.
+ * Exported so callers that supply their own chain to `buildEngine()` can
+ * extend it instead of re-creating it.
+ * @param {{ maxArticles?: number }} ch - ChannelConfig
+ * @returns {Array<(articles: object[]) => object[]|Promise<object[]>>}
+ */
+export function createDefaultMiddlewares(ch) {
+  return [
+    createTechRelevanceMiddleware(),
+    createScoringMiddleware({ maxArticles: ch.maxArticles || 12 }),
+    createSemanticDedupMiddleware(),
+  ];
+}
+
+/**
  * Build a ContentRadar instance for a single channel
  * Shared by runner, and adapters for /preview, /queue endpoints
  * @param {Object} ch - ChannelConfig
- * @param {import('../core/contracts.js').CachePlugin} cache - raw cache (will be prefixed)
+ * @param {import('../core/contracts.js').CachePlugin|{
+ *   cache: import('../core/contracts.js').CachePlugin,
+ *   deliveryStore?: object,
+ *   clock?: () => Date,
+ *   middlewares?: Array<(articles: object[]) => object[]|Promise<object[]>>,
+ * }} cacheOrDependencies - raw cache (will be prefixed), or the dependencies
+ *   object. `middlewares` replaces the default selection chain from
+ *   `createDefaultMiddlewares(ch)`; leave it out to keep the default.
  * @returns {ContentRadar}
  */
 export function buildEngine(ch, cacheOrDependencies, additionalDependencies = {}) {
   const dependencies = cacheOrDependencies?.cache
     ? cacheOrDependencies
     : { ...additionalDependencies, cache: cacheOrDependencies };
-  const { cache, deliveryStore, clock } = dependencies;
+  const { cache, deliveryStore, clock, middlewares } = dependencies;
+  const chain = middlewares === undefined ? createDefaultMiddlewares(ch) : middlewares;
+  if (!Array.isArray(chain) || chain.some(middleware => typeof middleware !== 'function')) {
+    throw new TypeError('buildEngine middlewares must be an array of functions');
+  }
   const prefixed = new PrefixedCache(cache, `news:${ch.id}`);
   const engine = new ContentRadar();
   for (const src of ch.sources) engine.addSource(src);
@@ -233,9 +263,7 @@ export function buildEngine(ch, cacheOrDependencies, additionalDependencies = {}
   engine.addOutput(ch.output);
   engine.useCache(prefixed);
   if (deliveryStore) engine.useDeliveryStore(deliveryStore);
-  engine.use(createTechRelevanceMiddleware());
-  engine.use(createScoringMiddleware({ maxArticles: ch.maxArticles || 12 }));
-  engine.use(createSemanticDedupMiddleware());
+  for (const middleware of chain) engine.use(middleware);
   engine.configure({
     maxArticlesPerSource: ch.maxArticlesPerSource || 3,
     concurrency: ch.concurrency || 5,

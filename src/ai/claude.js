@@ -3,7 +3,7 @@
  */
 
 import { AIPlugin } from '../core/contracts.js';
-import { buildPromptForDelivery, VIETNAMESE_OUTPUT_RULES } from './_prompts.js';
+import { buildPromptForDelivery, outputRulesFor } from './_prompts.js';
 
 const PROVIDER_ID = 'claude';
 const MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024;
@@ -29,18 +29,25 @@ export class ClaudeAI extends AIPlugin {
   get name() { return `Claude (${this._config.model})`; }
 
   async summarize(articles, options = {}) {
-    const { language = 'vi', style = 'digest', audience, platform, systemPrompt, _rawUserPrompt, maxTokens = 4096 } = options;
+    const {
+      language = 'vi', style = 'digest', audience, platform, systemPrompt, customSystemPrompt,
+      _rawUserPrompt, maxTokens = 4096,
+    } = options;
     const prompt = buildPromptForDelivery(articles, {
       language,
       style,
       audience,
       platform,
       deliveryMode: options.deliveryMode,
+      customSystemPrompt,
     });
+    // A legacy `systemPrompt` still replaces the whole prompt, but the output
+    // language rules for the requested language are always enforced.
     const systemContent = systemPrompt || prompt.system;
-    const finalSystem = systemContent.includes(VIETNAMESE_OUTPUT_RULES)
+    const outputRules = outputRulesFor(language);
+    const finalSystem = systemContent.includes(outputRules)
       ? systemContent
-      : `${systemContent}\n\n${VIETNAMESE_OUTPUT_RULES}`;
+      : `${systemContent}\n\n${outputRules}`;
 
     let response;
     try {

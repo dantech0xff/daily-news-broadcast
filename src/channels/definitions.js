@@ -22,7 +22,8 @@ const PROVIDER_KEY_MAP = {
   custom: 'CUSTOM_AI_API_KEY',
 };
 
-const IT_AUDIENCE = 'nguoi lam IT Viet Nam: developers, engineers, product, data, security, operations, technical leaders';
+/** Audience string used by every built-in channel prompt. */
+export const IT_AUDIENCE = 'nguoi lam IT Viet Nam: developers, engineers, product, data, security, operations, technical leaders';
 
 /**
  * Helper: resolve env value (works for both CF env object and process.env)

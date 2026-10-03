@@ -97,7 +97,7 @@ export class ContentRadar {
   setLogger(fn) { this.logger = fn; return this; }
 
   configure(options) {
-    this.options = { ...this.options, ...options, language: 'vi', secondaryLanguage: null };
+    this.options = { ...this.options, ...options, secondaryLanguage: null };
     this._machine = null;
     return this;
   }
@@ -922,8 +922,10 @@ export class ContentRadar {
     if (!force) articles = await this._dedup(articles, { dryRun });
     selection.fresh = articles.length;
     if (exclude) {
+      const candidates = articles;
       articles = exclude(articles);
       selection.uncovered = articles.length;
+      await this._reportCoveredStories(candidates, articles);
     }
     selection.relevant = articles.length;
     for (const middleware of this.middlewares) {
@@ -933,6 +935,25 @@ export class ContentRadar {
     selection.ranked = articles.length;
     if (limit !== undefined) articles = articles.slice(0, positiveInteger(limit, 'articleLimit'));
     return { articles, sourceHealth: fetched.sourceHealth, selection };
+  }
+
+  /**
+   * Diagnostics only: hand the candidates a radar scan skipped as already-covered
+   * stories to the optional `onCoveredStoriesExcluded` observer. The observer
+   * cannot change the selection, and its failures are logged, never raised.
+   */
+  async _reportCoveredStories(candidates, kept) {
+    const observer = this.options.onCoveredStoriesExcluded;
+    if (typeof observer !== 'function' || kept.length === candidates.length) return;
+    const keptArticles = new Set(kept);
+    try {
+      await observer(candidates.filter(article => !keptArticles.has(article)));
+    } catch (error) {
+      console.warn('[Radar] Covered-story observer failed', {
+        channelId: this.options.channelId,
+        error: sanitizeError(error),
+      });
+    }
   }
 
   async _prepareDripDeliveries(machine, articles, publishingDay) {
@@ -1086,10 +1107,11 @@ export class ContentRadar {
     );
     const result = await withOperationTimeout(
       signal => this.ai.summarize(articles, {
-        language: 'vi',
+        language: this.options.language || 'vi',
         style: this.options.style,
         audience: this.options.audience,
         platform: this.options.platform,
+        ...(this.options.customSystemPrompt && { customSystemPrompt: this.options.customSystemPrompt }),
         deliveryMode: mode,
         signal,
       }),

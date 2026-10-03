@@ -1,10 +1,18 @@
-# CLAUDE.md — Content Radar
+# Content Radar — Agent Guide
+
+`CLAUDE.md` and `AGENTS.md` are identical copies of this guide; edit both together.
 
 ## Project Overview
 
-**Content Radar** is a plugin-based engine that scans technology content from any data source, filters it for tech relevance, summarizes it with any AI model, and posts results to social output channels — Telegram is active today; X, Facebook, and Threads exist and activate once their environment variables are configured. The architecture is fully modular — every component is a swappable plugin.
+**Content Radar** is a plugin-based engine that scans technology content from any data source, filters it for tech relevance, summarizes it with any AI model, and posts results to social output channels. The architecture is fully modular — every component is a swappable plugin.
 
-This is NOT a monolithic app. It's a **composable engine** with a plugin registry pattern.
+Three runtimes share the engine:
+
+- **Dashboard app** (`src/app/` + `web/`) — one Node process: React dashboard, API, channel scheduler, and SQLite. Telegram channels, sources, prompts, AI providers, and encrypted credentials are configured in the dashboard without a redeploy. It is the primary engine, deployed on Dokploy behind Cloudflare Tunnel + Access; the production cutover happened on 2026-10-03 (`docs/deployment.md`).
+- **Cloudflare Worker** `news-engine` — the previous production runtime; its `telegram-main` channel was paused, not deleted, at the cutover so it stays available for rollback.
+- **Node CLI** (`src/adapters/node.js`) — channels from environment variables. Telegram is active today; X, Facebook, and Threads exist and activate once their environment variables are configured.
+
+This is NOT a monolithic app. It's a **composable engine** with a plugin registry pattern; the runtimes are thin layers around it.
 
 Kept identifiers: the Cloudflare Worker, its AI Gateway ID, `NEWS_*` bindings/env vars, the `news:{channelId}` cache prefix, and other production-facing names still use `news-engine`/`news` on purpose — see README.md's "Kept Production Identifiers" for what they are and why renaming them breaks durable state.
 
@@ -16,6 +24,7 @@ src/
 │   ├── contracts.js         # 4 plugin interfaces: SourcePlugin, AIPlugin, OutputPlugin, CachePlugin
 │   ├── engine.js            # ContentRadar orchestrator — fluent builder, pipeline executor
 │   ├── caches.js            # 4 cache implementations: Memory, File, CloudflareKV, Redis
+│   ├── delivery-state-machine.js / delivery-store.js / sqlite-delivery-store.js  # Durable delivery state
 │   ├── tech-relevance.js    # Tech relevance gate — createTechRelevanceMiddleware(), scoreTechRelevance()
 │   ├── story-dedup.js       # Story dedup — excludeCoveredStories(), pickDistinctStories() for radar scans
 │   └── index.js             # Barrel exports
@@ -26,12 +35,14 @@ src/
 │   ├── hackernews.js        # HackerNewsSource (Algolia API, no auth)
 │   ├── reddit.js            # RedditSource (public JSON API, no auth)
 │   ├── devto.js             # DevToSource + JSONAPISource (generic JSON adapter)
+│   ├── github-trending.js   # GitHubTrendingSource
 │   └── index.js
 │
 ├── ai/                      # AI plugins (each extends AIPlugin)
 │   ├── claude.js            # ClaudeAI (Anthropic native API)
 │   ├── openai-compat.js     # OpenAICompatibleAI + factory helpers: openai(), groq(), gemini(), ollama(), openRouter(), togetherAI()
-│   ├── _prompts.js          # Shared prompt builder — buildPrompt(articles, {language, style})
+│   ├── create-ai.js         # createAI() — shared provider factory for every runtime
+│   ├── _prompts.js          # Shared prompt builder — buildPrompt(articles, {language, style, audience, customSystemPrompt})
 │   └── index.js
 │
 ├── outputs/                 # Output plugins (each extends OutputPlugin)
@@ -40,22 +51,45 @@ src/
 │   └── index.js
 │
 ├── presets/                 # Pre-configured source bundles
-│   └── index.js             # bigTechBlogs(), communitySources(), aiMLBlogs(), devopsSources(), mobileSources()
+│   └── index.js             # bigTechBlogs(), communitySources(), aiMLBlogs(), aiNewsSources(), aiDeepDiveSources(), devopsSources(), mobileSources()
+│
+├── channels/                # Env-defined channels (CLI + Worker) and the shared runner
+│   ├── definitions.js       # defineChannels(env)
+│   └── runner.js            # buildEngine(), runChannels(), listUnresolvedTargets(), sanitizeRuntimeError()
+│
+├── app/                     # Dashboard app (Node ≥22.13, node:sqlite) — see docs/system-architecture.md
+│   ├── server.js            # Process lifecycle: env → DB → migrations → vault → seed → listen → lease; graceful shutdown
+│   ├── create-app.js        # Express app: security headers, /healthz, Access JWT, roles, API routes, static UI
+│   ├── config/env.js        # loadAppConfig() — validates every variable, fails fast without echoing values
+│   ├── auth/                # access-jwt.js (jose), roles.js (viewer/operator), access-middleware.js
+│   ├── api/                 # Routes (health, meta, channels, credentials, operations, content, stats, SSE events), http.js guards, redaction.js
+│   ├── db/                  # node-sql-storage.js, open-database.js, app-migrations.js (+ VACUUM INTO backups), runtime-lease.js, run/content/stats repositories
+│   ├── channels/            # config-schema.js, source-factories.js (PRESET_FACTORIES), build-channel.js, channel-repository.js, seed.js
+│   ├── secrets/             # vault.js (AES-256-GCM), credential-repository.js (write-only)
+│   └── runtime/             # create-runtime.js, scheduler.js, run-channel.js, controls.js, content-sync.js, retention.js, not-before.js, cutover-guard.js
 │
 └── adapters/                # Runtime adapters (thin wrappers around ContentRadar)
     ├── cloudflare.js        # Cloudflare Worker: scheduled() + fetch() handlers
-    └── node.js              # Node.js CLI: run | cron | preview commands
+    ├── cloudflare-channel-coordinator.js  # One Durable Object per channel
+    └── node.js              # Node.js CLI: run | cron | preview | recovery commands; executeRecoveryControl()
+
+web/                         # Dashboard UI: React + Vite + TypeScript (the only TypeScript), built to web/dist
+scripts/
+└── dev-access-token.mjs     # Signs local Cloudflare Access JWTs for development (npm run dev:token)
+tests/                       # *.test.js Node suites (tests/app = dashboard app), tests/workers (Vitest pool), tests/e2e (*.e2e.js, Playwright)
 ```
 
 ## Key Design Decisions
 
 1. **Plugin contracts in `core/contracts.js`** — 4 abstract base classes. Every plugin must extend one. The engine type-checks plugins at registration time.
-2. **Engine never imports from plugin directories** — `core/` has zero imports from `sources/`, `ai/`, `outputs/`. All wiring happens in adapters or user code.
+2. **Engine never imports from plugin directories** — `core/` has zero imports from `sources/`, `ai/`, `outputs/`. All wiring happens in adapters, `src/app/`, or user code.
 3. **Fluent builder API** — `engine.addSource().useAI().addOutput().useCache().configure()` — all chainable, all return `this`.
-4. **Pipeline flow** — `Fetch → Ledger dedup → (drip scans only) story-coverage exclusion → Middleware (tech relevance → scoring → semantic dedup) → AI Summarize → Sequential output delivery`. Middleware is `(articles) => articles` transform functions injected via `.use()`; outputs are claimed and committed one at a time, never in parallel.
+4. **Pipeline flow** — `Fetch → Ledger dedup → (drip scans only) story-coverage exclusion → Middleware (tech relevance → scoring → semantic dedup) → AI Summarize → Sequential output delivery`. Middleware is `(articles) => articles` transform functions injected via `.use()`; outputs are claimed and committed one at a time, never in parallel. The dashboard app puts its `notBefore` cutover filter ahead of the tech gate.
 5. **Zero external dependencies for core parsing** — RSS/HTML parsers use regex, no cheerio/xml2js. This keeps it Cloudflare Worker compatible.
-6. **AI prompt system** — `_prompts.js` exports `buildPrompt()` which generates `{system, user}` pair based on language (`vi`/`en`) and style (`digest`/`bullet`/`thread`/`newsletter`). All AI plugins consume this.
+6. **AI prompt system** — `_prompts.js` exports `buildPrompt()` which generates a `{system, user}` pair from language (`vi`/`en`), style, audience, and platform. A per-channel `customSystemPrompt` replaces only the style section; the output-language, source-data, and platform rules always stay. All AI plugins consume this.
 7. **Presets are just factory functions** — they return `SourcePlugin[]` arrays. Users spread them into `.addSource()`.
+8. **The dashboard app reuses the engine, unchanged** — stored channels are built into the `defineChannels()` shape and run through `runChannels()`/`buildEngine()`; controls call the CLI's `executeRecoveryControl()`; the Worker's `SQLiteDeliveryStore` runs on `node:sqlite` through `createNodeSqlStorage()`.
+9. **Dashboard security** — Cloudflare Access JWT verified on every request except `GET /healthz` (no bypass); `viewer`/`operator` roles from env; mutations need operator + exact `PUBLIC_ORIGIN` + JSON + bounded body; secrets are write-only; every channel starts paused; one instance via a SQLite lease.
 
 ## Plugin Contracts
 
@@ -76,7 +110,7 @@ fetch({ limit?, since?, config? }) → Promise<Article[]>
 ```
 get id → string
 get name → string
-summarize(articles, { language?, style?, systemPrompt?, maxTokens? }) → Promise<{ text, usage?, model? }>
+summarize(articles, { language?, style?, audience?, platform?, customSystemPrompt?, systemPrompt?, maxTokens?, signal? }) → Promise<{ text, usage?, model? }>
 ```
 
 ### OutputPlugin (outputs must implement)
@@ -98,12 +132,14 @@ delete(key) → Promise<void>
 ## Code Conventions
 
 - **ES Modules only** — all files use `import/export`, `"type": "module"` in package.json
-- **No TypeScript** — plain JS with JSDoc annotations for types
-- **No build step** — runs directly via Node 18+ or Cloudflare Workers
-- **Naming**: plugins use PascalCase class names, factory helpers use camelCase (`groq()`, `ollama()`)
+- **No TypeScript** — plain JS with JSDoc annotations for types. The one exception is `web/` (React + Vite + TypeScript, `strict`)
+- **No build step** — runs directly via Node 18+ or Cloudflare Workers; only the dashboard UI in `web/` is built (Vite → `web/dist`). The dashboard app needs Node ≥22.13
+- **Naming**: plugins use PascalCase class names, factory helpers use camelCase (`groq()`, `ollama()`); files are kebab-case
 - **Config injection** — plugins receive config in constructor, store as `this._config`
 - **Error handling** — fetch operations use try/catch and return empty arrays on failure rather than throwing. AI and output plugins throw on failure (engine catches).
 - **Concurrency** — engine batches source fetches by `options.concurrency`, uses `Promise.allSettled`, 500ms delay between batches
+- **Secrets** — never print, log, or commit environment values or secrets (no `printenv`/`env`, no `docker compose config` without `--no-env-resolution`); dashboard credentials are write-only
+- **UI** — Vietnamese text (technical terms in English); CSP-safe: no inline scripts or runtime `<style>` injection, no `dangerouslySetInnerHTML`, external links with `rel="noopener noreferrer"`
 
 ## Working With This Codebase
 
@@ -115,14 +151,16 @@ delete(key) → Promise<void>
 4. `fetch()` must return `Article[]` matching the schema
 5. Export from `src/sources/index.js`
 6. Optionally add to a preset in `src/presets/index.js`
+7. To offer it as a typed source in the dashboard, add it to `TYPED_SOURCES` in `src/app/channels/source-factories.js` and its field spec in `src/app/api/meta-routes.js` (`tests/app/api-meta.test.js` checks they agree)
 
 ### Adding a new AI provider
 
 1. If OpenAI-compatible API → add a new factory helper in `openai-compat.js` + register in `create-ai.js`
 2. If custom API → create `src/ai/my-ai.js`, extend `AIPlugin`, implement `summarize()`
-3. Use `buildPrompt()` from `_prompts.js` for consistent prompt formatting (supports `audience` param)
+3. Use `buildPrompt()` from `_prompts.js` for consistent prompt formatting (supports `audience` and `customSystemPrompt`)
 4. Export from `src/ai/index.js`
 5. Add provider to `createAI()` switch in `src/ai/create-ai.js` (shared factory used by all adapters)
+6. For the dashboard, add it to `AI_PROVIDERS` (and its credential policy in `aiCredentialRequirements()`) in `src/app/channels/config-schema.js`; `/api/meta` serves the list to the UI
 
 ### Adding a new output channel
 
@@ -131,12 +169,13 @@ delete(key) → Promise<void>
 3. Engine auto-truncates content to `maxLength` before calling `send()`
 4. If the output has message size limits (Telegram 4096, Discord 2000), implement splitting inside `send()`
 5. Export from `src/outputs/index.js`
+6. The dashboard app manages Telegram channels only; other outputs run through the CLI or the Worker
 
 ### Adding a new prompt style
 
 1. Edit `src/ai/_prompts.js`
 2. Add entry to `STYLES` object: `myStyle: { vi: (audience) => '...', en: (audience) => '...' }`
-3. Use via `engine.configure({ style: 'myStyle' })`
+3. Use via `engine.configure({ style: 'myStyle' })`; the dashboard lists it automatically (`PROMPT_STYLES` → `/api/meta`)
 4. Available built-in styles: `digest`, `bullet`, `thread`, `newsletter`, `weekly`, `mustread`
 
 ### Using content intelligence middlewares
@@ -160,30 +199,44 @@ The engine pipeline in `engine.js` (`run()` for digest mode, `runDrip()` for rad
 2. _fetchAllDetailed() — batched fetch from all sources (with retry)
 3. _dedup() — filter via the delivery ledger and legacy compatibility data
 4. (drip scans only) exclude articles covering a story already delivered in the current/previous publishing day
-5. middlewares — tech relevance gate → scoring → semantic dedup → any custom `.use()` transforms
+5. middlewares — tech relevance gate → scoring → semantic dedup → any custom `.use()` transforms (the app prepends its notBefore filter)
 6. ai.summarize() — with audience context, grouped articles (throws if no AI is configured)
 7. output.send() — one output at a time, in configured topology order; each result is committed durably before the next output starts
 8. mark the article/delivery state as terminal on completion
 ```
 
+Shared modules (`src/core`, `src/ai`, `src/channels`) also run in the Worker: keep changes backward compatible and `npm run test:workers` green. Do not change `src/adapters/cloudflare*.js` or `wrangler*.toml` without an explicit request.
+
 ### Adding a new preset
 
 1. Edit `src/presets/index.js` — add factory function returning `SourcePlugin[]`
-2. Register in `src/dashboard/stream-runner.js` → `PRESET_FACTORIES` map
+2. Register it in `PRESET_FACTORIES` in `src/app/channels/source-factories.js` (`tests/app/source-factories.test.js` fails until every exported preset is registered); the dashboard lists it through `/api/meta`
 3. Export from `src/presets/index.js`
 4. Available presets: `bigTechBlogs`, `communitySources`, `aiMLBlogs`, `aiNewsSources`, `aiDeepDiveSources`, `devopsSources`, `mobileSources`
+
+### Working on the dashboard app
+
+- Routes: reads use `guards.viewer`; every mutation uses `guards.mutation()` (operator, same origin, JSON, body limit). Take the actor from `req.auth.actor`, never from the body.
+- Schema: add a new entry to `APP_MIGRATIONS` in `src/app/db/app-migrations.js`; never edit an applied one (a `VACUUM INTO` backup runs first).
+- Responses go through allowlist projections (`src/app/api/redaction.js`); provider text through `sanitizeRuntimeError()`.
+- Tests: `tests/app/helpers/` starts the real app with fake plugins (`startTestApp`) or a runtime fixture (`createRuntimeFixture`); production code has no test flags.
 
 ### Testing locally
 
 ```bash
-# Preview mode — fetch + summarize, no sending
-node src/adapters/node.js preview
+# Test suites (all offline)
+npm test                 # Node + Workers
+npm run test:web         # dashboard typecheck + unit tests (after npm run web:install)
+npx playwright install chromium   # once
+npm run test:e2e         # builds web/dist, Playwright against the real app on 127.0.0.1:4310
 
-# Preview specific channel
+# CLI preview — fetch + summarize, no sending
+node src/adapters/node.js preview
 node src/adapters/node.js preview --channel telegram-main
 
-# Force skip dedup cache
-node src/adapters/node.js run --force
+# CLI force (explicit operator, reason, and duplicate-risk acknowledgement)
+node src/adapters/node.js run --force --channel telegram-main --idempotency-key <key> \
+  --operator-id <key-id> --reason "<why>" --confirm-duplicate-risk
 
 # Test individual preset fetch
 node -e "
@@ -194,12 +247,20 @@ for (const src of aiNewsSources()) {
 }
 "
 
-# Dashboard (config-driven streams)
-npm run dashboard
+# Dashboard app (development; README "Run the dashboard locally" has the details)
+export ACCESS_TEAM_DOMAIN=https://dev-access.content-radar.invalid ACCESS_AUD=content-radar-dev
+export DEV_ACCESS_TOKEN="$(npm run -s dev:token -- --email you@example.com)"
+NODE_ENV=development ACCESS_JWKS_FILE=.cache/dev-access/jwks.json APP_OPERATOR_EMAILS=you@example.com \
+  PUBLIC_ORIGIN=http://localhost:5173 DATA_DIR=.cache/app-data CACHE_PATH=.cache/app-data/news.json \
+  npm run app:dev        # APP_MASTER_KEY from .env; npm run dashboard is an alias of npm run app
+npm run web:dev          # second terminal, same DEV_ACCESS_TOKEN; http://localhost:5173
+
+# App image (Compose service news-engine, volume data, 127.0.0.1:3000)
+npm run docker:build && npm run docker:run
 
 # Cloudflare dev mode
 npx wrangler dev
-# Then: curl http://localhost:8787/preview
+# Then: curl http://localhost:8787/health
 ```
 
 ## File-Level Reference
@@ -223,25 +284,42 @@ npx wrangler dev
 | `ai/claude.js` | `ClaudeAI` | Anthropic native `/v1/messages` endpoint |
 | `ai/openai-compat.js` | `OpenAICompatibleAI`, `openai()`, `groq()`, `gemini()`, `ollama()`, `openRouter()`, `togetherAI()` | One class, many providers |
 | `ai/create-ai.js` | `createAI()` | Shared factory for all adapters |
-| `ai/_prompts.js` | `buildPrompt()` | Editorial prompts with audience, grouping, 6 styles |
+| `ai/_prompts.js` | `buildPrompt()`, `PROMPT_STYLES`, `PROMPT_LANGUAGES` | Editorial prompts with audience, grouping, 6 styles, `vi`/`en`, custom system prompt |
 | `outputs/telegram.js` | `TelegramOutput` | Auto-split, markdown fallback |
 | `outputs/channels.js` | `SlackOutput`, `DiscordOutput`, `EmailOutput`, `WebhookOutput`, `MarkdownFileOutput` | All extend OutputPlugin |
-| `presets/index.js` | `bigTechBlogs()`, `communitySources()`, `aiMLBlogs()`, `devopsSources()`, `mobileSources()` | Return SourcePlugin[] |
+| `presets/index.js` | `bigTechBlogs()`, `communitySources()`, `aiMLBlogs()`, `aiNewsSources()`, `aiDeepDiveSources()`, `devopsSources()`, `mobileSources()` | Return SourcePlugin[] |
+| `channels/runner.js` | `buildEngine()`, `runChannels()`, `createDefaultMiddlewares()`, `listUnresolvedTargets()`, `sanitizeRuntimeError()`, `shouldRun()` | Shared by the CLI and the dashboard app |
 | `adapters/cloudflare.js` | default export (Worker) | Thin wrapper: creates engine from env |
-| `adapters/node.js` | CLI entry point | Commands: run, cron, preview, help |
+| `adapters/node.js` | CLI entry point, `executeRecoveryControl()`, `preview()` | Commands: run, cron, preview, recovery |
+| `app/server.js` | `startServer()` | App process: startup order, SIGTERM handling, shutdown wait |
+| `app/create-app.js` | `createApp()` | Express pipeline: headers, `/healthz`, Access JWT, roles, routes, static UI |
+| `app/config/env.js` | `loadAppConfig()`, `AppConfigError` | Every app env variable and its rule |
+| `app/auth/access-jwt.js` | `createAccessVerifier()`, `createAccessKeySet()`, `readAccessToken()` | RS256, issuer, AUD, exp; header `Cf-Access-Jwt-Assertion` only |
+| `app/auth/roles.js` | `createRoleResolver()`, `identityFromClaims()`, `actorFor()` | Email or service-token client ID → viewer/operator |
+| `app/db/node-sql-storage.js` | `createNodeSqlStorage()` | Durable Object SQL surface over `node:sqlite` |
+| `app/db/app-migrations.js` | `APP_MIGRATIONS`, `runAppMigrations()`, `backupBeforeDeliveryStoreUpgrade()` | Append-only app schema, `VACUUM INTO` backups |
+| `app/db/runtime-lease.js` | `RuntimeLease` | Single-instance lease |
+| `app/secrets/vault.js` | `SecretVault`, `parseMasterKey()` | AES-256-GCM, key fingerprint check |
+| `app/secrets/credential-repository.js` | `CredentialRepository` | Write-only credentials |
+| `app/channels/config-schema.js` | `validateChannelConfig()`, `AI_PROVIDERS`, `LIMIT_RANGES` | One validation step for API input, stored rows, and the seed |
+| `app/channels/source-factories.js` | `PRESET_FACTORIES`, `SOURCE_TYPES`, `createSourcePlugins()` | Preset registry and typed sources |
+| `app/channels/build-channel.js` | `buildChannelFromConfig()` | Stored channel + credentials → `defineChannels()` shape |
+| `app/channels/seed.js` | `seedDefaultChannels()`, `telegramMainSeedConfig()` | Paused `telegram-main` with the Worker's production settings |
+| `app/runtime/create-runtime.js` | `createRuntime()` | Service the API calls: channels, credentials, runs, preview, controls, status, library, stats |
+| `app/runtime/scheduler.js` | `RuntimeScheduler` | Per-channel cron in its timezone, one global queue, lease gating, shutdown wait |
+| `app/runtime/controls.js` | `ChannelControls`, `CONTROL_ACTIONS` | Pause/resume and recovery actions through `executeRecoveryControl()` |
+| `app/runtime/not-before.js` / `cutover-guard.js` | `createNotBeforeMiddleware()` / `assertCutoverReady()` | Cutover cutoff filter and the `cutoverRequired` guard |
 
 ## Environment Variables
 
 ```
-# Required (depends on which plugins you use)
+# CLI / Worker (depends on which plugins you use)
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 ANTHROPIC_API_KEY=
-
-# Optional
 OPENAI_API_KEY=
 GROQ_API_KEY=
-CACHE_TYPE=file          # file | redis | memory
+CACHE_TYPE=file          # file | redis | memory (CLI)
 CACHE_PATH=.cache/news.json
 REDIS_URL=redis://localhost:6379
 CRON_SCHEDULE=0 7 * * *  # 7:00 UTC = 14:00 VN
@@ -249,17 +327,36 @@ SUMMARY_LANGUAGE=vi
 MAX_ARTICLES_PER_SOURCE=3
 CONCURRENCY_LIMIT=5
 DRIP_DAILY_LIMIT=18      # Telegram radar's daily article limit; other channels use fixed limits
+
+# Dashboard app (rules in src/app/config/env.js; channel secrets are entered in the UI, not env)
+DATA_DIR=                # content-radar.db, backups/, cache (/data in Docker)
+APP_MASTER_KEY=          # base64 of 32 random bytes; keep a copy in a password manager
+ACCESS_TEAM_DOMAIN=      # https://<team>.cloudflareaccess.com
+ACCESS_AUD=              # Access application AUD tag(s)
+APP_OPERATOR_EMAILS=
+APP_VIEWER_EMAILS=
+APP_SERVICE_TOKEN_ROLES= # <client-id>:operator|viewer
+PUBLIC_ORIGIN=           # exact origin users open
+CONTENT_SCAN_RETENTION_DAYS=30
+RUN_HISTORY_RETENTION_DAYS=180
+SHUTDOWN_WAIT_SECONDS=120   # container stop grace ≥ this + 15 s
+ACCESS_JWKS_FILE=        # development only; needs NODE_ENV=development or test
 ```
+
+The app also loads `.env`; give it its own `CACHE_PATH` inside `DATA_DIR` rather than the CLI cache file.
 
 ## Dependencies
 
 ### Required
-- `node-cron` — cron scheduling for Node.js adapter daemon mode
+- `node-cron` — cron scheduling for the CLI daemon and the dashboard scheduler
+- `express` — dashboard app server
+- `jose` — Cloudflare Access JWT verification
 
 ### Optional  
 - `dotenv` — .env file loading
 - `redis` — only if using RedisCache
-- `wrangler` — only for Cloudflare Workers deployment
+- `wrangler` — only for Cloudflare Workers deployment (dev dependency)
+- `@playwright/test` — browser E2E suite (dev dependency); the UI's own dependencies live in `web/package.json`
 
 ### Zero deps for core
 The core engine, all source parsers, AI clients, and output senders use only `fetch()` (native in Node 18+, CF Workers, Bun, Deno).

@@ -1,0 +1,782 @@
+{
+  "channel": {
+    "platforms": [
+      "telegram"
+    ],
+    "modes": [
+      "digest",
+      "drip"
+    ],
+    "idPattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    "idMaxLength": 64,
+    "nameMaxLength": 100,
+    "cronMaxLength": 120
+  },
+  "sources": {
+    "maxEntries": 50,
+    "presets": [
+      {
+        "id": "bigTechBlogs",
+        "sources": [
+          {
+            "id": "uber",
+            "name": "Uber Engineering"
+          },
+          {
+            "id": "meta",
+            "name": "Meta Engineering"
+          },
+          {
+            "id": "netflix",
+            "name": "Netflix Tech Blog"
+          },
+          {
+            "id": "aws",
+            "name": "AWS Architecture"
+          },
+          {
+            "id": "cloudflare",
+            "name": "Cloudflare Blog"
+          },
+          {
+            "id": "github",
+            "name": "GitHub Blog"
+          },
+          {
+            "id": "google-dev",
+            "name": "Google Developers"
+          },
+          {
+            "id": "stripe",
+            "name": "Stripe Engineering"
+          },
+          {
+            "id": "airbnb",
+            "name": "Airbnb Tech Blog"
+          },
+          {
+            "id": "linkedin",
+            "name": "LinkedIn Engineering"
+          },
+          {
+            "id": "spotify",
+            "name": "Spotify Engineering"
+          },
+          {
+            "id": "dropbox",
+            "name": "Dropbox Tech Blog"
+          },
+          {
+            "id": "shopify",
+            "name": "Shopify Engineering"
+          },
+          {
+            "id": "vercel",
+            "name": "Vercel Blog"
+          },
+          {
+            "id": "mozilla",
+            "name": "Mozilla Hacks"
+          }
+        ]
+      },
+      {
+        "id": "communitySources",
+        "sources": [
+          {
+            "id": "hackernews",
+            "name": "Hacker News"
+          },
+          {
+            "id": "reddit:programming",
+            "name": "r/programming"
+          },
+          {
+            "id": "reddit:ExperiencedDevs",
+            "name": "r/ExperiencedDevs"
+          },
+          {
+            "id": "devto",
+            "name": "Dev.to"
+          },
+          {
+            "id": "github-trending",
+            "name": "GitHub Trending"
+          }
+        ]
+      },
+      {
+        "id": "aiMLBlogs",
+        "sources": [
+          {
+            "id": "openai",
+            "name": "OpenAI Blog"
+          },
+          {
+            "id": "deepmind",
+            "name": "Google DeepMind"
+          },
+          {
+            "id": "huggingface",
+            "name": "Hugging Face Blog"
+          },
+          {
+            "id": "reddit:MachineLearning",
+            "name": "r/MachineLearning"
+          },
+          {
+            "id": "hackernews:AI LLM",
+            "name": "Hacker News"
+          }
+        ]
+      },
+      {
+        "id": "aiNewsSources",
+        "sources": [
+          {
+            "id": "openai",
+            "name": "OpenAI Blog"
+          },
+          {
+            "id": "deepmind",
+            "name": "Google DeepMind"
+          },
+          {
+            "id": "huggingface",
+            "name": "Hugging Face Blog"
+          },
+          {
+            "id": "techcrunch-ai",
+            "name": "TechCrunch AI"
+          },
+          {
+            "id": "verge-ai",
+            "name": "The Verge AI"
+          },
+          {
+            "id": "ars-ai",
+            "name": "Ars Technica AI"
+          },
+          {
+            "id": "venturebeat-ai",
+            "name": "VentureBeat AI"
+          },
+          {
+            "id": "wired-ai",
+            "name": "WIRED AI"
+          },
+          {
+            "id": "mit-tech-review-ai",
+            "name": "MIT Technology Review AI"
+          },
+          {
+            "id": "ieee-spectrum-ai",
+            "name": "IEEE Spectrum AI"
+          },
+          {
+            "id": "reddit:LocalLLaMA",
+            "name": "r/LocalLLaMA"
+          },
+          {
+            "id": "reddit:artificial",
+            "name": "r/artificial"
+          },
+          {
+            "id": "hackernews:AI LLM GPT OpenAI Anthropic",
+            "name": "Hacker News"
+          }
+        ]
+      },
+      {
+        "id": "aiDeepDiveSources",
+        "sources": [
+          {
+            "id": "lilianweng",
+            "name": "Lilian Weng"
+          },
+          {
+            "id": "latentspace",
+            "name": "Latent Space"
+          },
+          {
+            "id": "ahead-of-ai",
+            "name": "Ahead of AI"
+          },
+          {
+            "id": "oneusefulthing",
+            "name": "One Useful Thing"
+          },
+          {
+            "id": "import-ai",
+            "name": "Import AI"
+          }
+        ]
+      },
+      {
+        "id": "devopsSources",
+        "sources": [
+          {
+            "id": "cloudflare-devops",
+            "name": "Cloudflare Blog"
+          },
+          {
+            "id": "hashicorp",
+            "name": "HashiCorp Blog"
+          },
+          {
+            "id": "reddit:devops",
+            "name": "r/devops"
+          },
+          {
+            "id": "devto:devops",
+            "name": "Dev.to"
+          }
+        ]
+      },
+      {
+        "id": "mobileSources",
+        "sources": [
+          {
+            "id": "android-dev",
+            "name": "Android Developers"
+          },
+          {
+            "id": "swift-blog",
+            "name": "Swift.org Blog"
+          },
+          {
+            "id": "reddit:androiddev",
+            "name": "r/androiddev"
+          },
+          {
+            "id": "reddit:iOSProgramming",
+            "name": "r/iOSProgramming"
+          }
+        ]
+      }
+    ],
+    "types": [
+      {
+        "type": "rss",
+        "fields": [
+          {
+            "key": "id",
+            "kind": "text",
+            "required": true,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          {
+            "key": "name",
+            "kind": "text",
+            "required": true,
+            "maxLength": 100
+          },
+          {
+            "key": "feedUrl",
+            "kind": "url",
+            "required": true,
+            "maxLength": 2048
+          },
+          {
+            "key": "icon",
+            "kind": "text",
+            "required": false,
+            "maxLength": 16
+          },
+          {
+            "key": "category",
+            "kind": "text",
+            "required": false,
+            "maxLength": 64
+          },
+          {
+            "key": "baseUrl",
+            "kind": "url",
+            "required": false,
+            "maxLength": 2048
+          }
+        ]
+      },
+      {
+        "type": "hackernews",
+        "fields": [
+          {
+            "key": "query",
+            "kind": "text",
+            "required": false,
+            "maxLength": 200
+          },
+          {
+            "key": "filter",
+            "kind": "enum",
+            "required": false,
+            "options": [
+              "front_page"
+            ]
+          },
+          {
+            "key": "minPoints",
+            "kind": "integer",
+            "required": false,
+            "min": 0,
+            "max": 100000
+          }
+        ]
+      },
+      {
+        "type": "reddit",
+        "fields": [
+          {
+            "key": "subreddit",
+            "kind": "text",
+            "required": true,
+            "maxLength": 21,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_]{1,20}$"
+          },
+          {
+            "key": "sort",
+            "kind": "enum",
+            "required": false,
+            "options": [
+              "hot",
+              "new",
+              "top",
+              "rising"
+            ]
+          },
+          {
+            "key": "minUpvotes",
+            "kind": "integer",
+            "required": false,
+            "min": 0,
+            "max": 1000000
+          }
+        ]
+      },
+      {
+        "type": "devto",
+        "fields": [
+          {
+            "key": "tag",
+            "kind": "text",
+            "required": false,
+            "maxLength": 30,
+            "pattern": "^[a-z0-9]{1,30}$"
+          },
+          {
+            "key": "minReactions",
+            "kind": "integer",
+            "required": false,
+            "min": 0,
+            "max": 1000000
+          }
+        ]
+      },
+      {
+        "type": "github-trending",
+        "fields": [
+          {
+            "key": "language",
+            "kind": "text",
+            "required": false,
+            "maxLength": 50,
+            "pattern": "^[A-Za-z0-9+#._-]{1,50}$"
+          },
+          {
+            "key": "since",
+            "kind": "enum",
+            "required": false,
+            "options": [
+              "daily",
+              "weekly"
+            ]
+          },
+          {
+            "key": "minStars",
+            "kind": "integer",
+            "required": false,
+            "min": 0,
+            "max": 10000000
+          }
+        ]
+      },
+      {
+        "type": "html",
+        "fields": [
+          {
+            "key": "id",
+            "kind": "text",
+            "required": true,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          {
+            "key": "name",
+            "kind": "text",
+            "required": true,
+            "maxLength": 100
+          },
+          {
+            "key": "url",
+            "kind": "url",
+            "required": true,
+            "maxLength": 2048
+          },
+          {
+            "key": "icon",
+            "kind": "text",
+            "required": false,
+            "maxLength": 16
+          },
+          {
+            "key": "category",
+            "kind": "text",
+            "required": false,
+            "maxLength": 64
+          }
+        ]
+      },
+      {
+        "type": "json",
+        "fields": [
+          {
+            "key": "id",
+            "kind": "text",
+            "required": true,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          {
+            "key": "name",
+            "kind": "text",
+            "required": true,
+            "maxLength": 100
+          },
+          {
+            "key": "url",
+            "kind": "url",
+            "required": true,
+            "maxLength": 2048
+          },
+          {
+            "key": "icon",
+            "kind": "text",
+            "required": false,
+            "maxLength": 16
+          },
+          {
+            "key": "category",
+            "kind": "text",
+            "required": false,
+            "maxLength": 64
+          },
+          {
+            "key": "itemsPath",
+            "kind": "jsonPath",
+            "required": false,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_$-]+(?:\\.[A-Za-z0-9_$-]+){0,9}$"
+          },
+          {
+            "key": "fields",
+            "kind": "jsonFields",
+            "required": true,
+            "fields": [
+              {
+                "key": "title",
+                "kind": "jsonPath",
+                "required": true,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_$-]+(?:\\.[A-Za-z0-9_$-]+){0,9}$"
+              },
+              {
+                "key": "url",
+                "kind": "jsonPath",
+                "required": true,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_$-]+(?:\\.[A-Za-z0-9_$-]+){0,9}$"
+              },
+              {
+                "key": "id",
+                "kind": "jsonPath",
+                "required": false,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_$-]+(?:\\.[A-Za-z0-9_$-]+){0,9}$"
+              },
+              {
+                "key": "content",
+                "kind": "jsonPath",
+                "required": false,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_$-]+(?:\\.[A-Za-z0-9_$-]+){0,9}$"
+              },
+              {
+                "key": "publishedAt",
+                "kind": "jsonPath",
+                "required": false,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_$-]+(?:\\.[A-Za-z0-9_$-]+){0,9}$"
+              },
+              {
+                "key": "author",
+                "kind": "jsonPath",
+                "required": false,
+                "maxLength": 200,
+                "pattern": "^[A-Za-z0-9_$-]+(?:\\.[A-Za-z0-9_$-]+){0,9}$"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "ai": {
+    "providers": [
+      {
+        "id": "claude",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "openai",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "groq",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "gemini",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": {
+          "apiKey": "none",
+          "tokenRequired": true,
+          "fields": [
+            {
+              "key": "accountId",
+              "kind": "text",
+              "required": true,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            {
+              "key": "gatewayId",
+              "kind": "text",
+              "required": true,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            {
+              "key": "byokAlias",
+              "kind": "text",
+              "required": false,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9_.-]{1,64}$"
+            }
+          ]
+        }
+      },
+      {
+        "id": "qwen",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "deepseek",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "ollama",
+        "apiKey": "none",
+        "baseUrl": "optional",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "openrouter",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "together",
+        "apiKey": "required",
+        "baseUrl": "none",
+        "customName": false,
+        "gateway": null
+      },
+      {
+        "id": "custom",
+        "apiKey": "optional",
+        "baseUrl": "required",
+        "customName": true,
+        "gateway": null
+      }
+    ],
+    "modelMaxLength": 200,
+    "modelPattern": "^[\\x21-\\x7e]+$",
+    "nameMaxLength": 100,
+    "baseUrlMaxLength": 2048
+  },
+  "prompt": {
+    "languages": [
+      "vi",
+      "en"
+    ],
+    "styles": [
+      "digest",
+      "bullet",
+      "hot_take",
+      "thread",
+      "newsletter",
+      "weekly",
+      "mustread"
+    ],
+    "defaultLanguage": "vi",
+    "defaultStyle": "digest",
+    "audienceMaxLength": 300,
+    "customSystemPromptMaxLength": 8000
+  },
+  "limits": {
+    "ranges": {
+      "batchSize": {
+        "min": 1,
+        "max": 100
+      },
+      "delayMs": {
+        "min": 0,
+        "max": 3600000
+      },
+      "dailyLimit": {
+        "min": 1,
+        "max": 500
+      },
+      "maxArticles": {
+        "min": 1,
+        "max": 500
+      },
+      "maxArticlesPerSource": {
+        "min": 1,
+        "max": 100
+      },
+      "concurrency": {
+        "min": 1,
+        "max": 50
+      }
+    },
+    "defaults": {
+      "batchSize": 5,
+      "delayMs": 0,
+      "dailyLimit": 18,
+      "maxArticles": 12,
+      "maxArticlesPerSource": 3,
+      "concurrency": 5
+    },
+    "maxBatchDelayMs": 600000
+  },
+  "credentials": {
+    "kinds": [
+      "telegram_bot_token",
+      "telegram_chat_id",
+      "ai_api_key",
+      "ai_gateway_token"
+    ],
+    "slots": [
+      {
+        "field": "telegram.botTokenCredentialId",
+        "kind": "telegram_bot_token"
+      },
+      {
+        "field": "telegram.chatIdCredentialId",
+        "kind": "telegram_chat_id"
+      },
+      {
+        "field": "ai.apiKeyCredentialId",
+        "kind": "ai_api_key"
+      },
+      {
+        "field": "ai.gateway.tokenCredentialId",
+        "kind": "ai_gateway_token"
+      }
+    ],
+    "labelMaxLength": 100,
+    "valueMaxLength": 4096
+  },
+  "controls": {
+    "actions": [
+      "pause",
+      "resume",
+      "retry-generation",
+      "retry-output",
+      "restore-topology",
+      "confirm-delivered",
+      "abandon",
+      "retry-maintenance"
+    ],
+    "reasonMaxLength": 500
+  },
+  "runs": {
+    "statuses": [
+      "running",
+      "success",
+      "partial",
+      "failed",
+      "ambiguous",
+      "skipped",
+      "error",
+      "interrupted"
+    ],
+    "triggerTypes": [
+      "scheduled",
+      "manual"
+    ],
+    "maxPageSize": 100
+  },
+  "content": {
+    "statuses": [
+      "selected",
+      "rejected",
+      "queued",
+      "generating",
+      "delivering",
+      "delivered",
+      "generation_failed",
+      "failed",
+      "ambiguous",
+      "blocked",
+      "abandoned"
+    ],
+    "rejectReasons": [
+      "before_cutoff",
+      "not_tech",
+      "low_score",
+      "duplicate"
+    ],
+    "dateFields": [
+      "seen",
+      "published",
+      "delivered"
+    ],
+    "maxPageSize": 100
+  },
+  "stats": {
+    "maxRangeDays": 400
+  }
+}

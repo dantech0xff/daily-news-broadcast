@@ -1,10 +1,39 @@
+# Local run of the Content Radar app image (the same Dockerfile Dokploy builds).
+#
+#   npm run docker:build   # docker build -t news-engine:local .
+#   npm run docker:run     # docker compose up -d
+#
+# `.env` is optional and shared with the CLI; the `environment` block below
+# overrides it with the container's paths, port, and production mode. The app
+# reads its own variables from `.env` (see src/app/config/env.js):
+# APP_MASTER_KEY, ACCESS_TEAM_DOMAIN, ACCESS_AUD, PUBLIC_ORIGIN
+# (http://127.0.0.1:3000 for this file), and at least one of
+# APP_OPERATOR_EMAILS, APP_VIEWER_EMAILS, or APP_SERVICE_TOKEN_ROLES.
+#
+# `news-engine` is a kept production identifier (README, "Kept Production
+# Identifiers"); do not rename the service or the image.
 services:
   news-engine:
     build: .
+    image: news-engine:local
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      HOST: "0.0.0.0"
+      # The port mapping and the image health check both expect 3000.
+      PORT: "3000"
+      DATA_DIR: /data
+      CACHE_PATH: /data/news.json
+    ports:
+      - "127.0.0.1:3000:3000"
     volumes:
-      - cache:/app/.cache
+      - data:/data
+    # SIGTERM waits for a channel run in flight (SHUTDOWN_WAIT_SECONDS, default
+    # 120 s) before the database closes; the grace period adds the 15 s margin.
+    stop_grace_period: 135s
 
 volumes:
-  cache:
+  data:
