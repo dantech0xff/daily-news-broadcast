@@ -22,7 +22,8 @@ export const ACCESS_CLOCK_TOLERANCE_SECONDS = 30;
 export const MAX_ACCESS_TOKEN_LENGTH = 8_192;
 /**
  * Issuer of locally signed development tokens (`npm run dev:token`). Used as
- * the default issuer only when ACCESS_JWKS_FILE is set outside production.
+ * the default issuer only when ACCESS_JWKS_FILE is set and NODE_ENV is
+ * `development` or `test`.
  */
 export const DEV_ACCESS_ISSUER = 'https://dev-access.content-radar.invalid';
 

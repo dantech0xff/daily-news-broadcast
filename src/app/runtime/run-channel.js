@@ -15,6 +15,7 @@ import { projectSelectionStats } from '../../core/delivery.js';
 import { DEFAULT_CHANNEL_FACTORIES, buildChannelFromConfig } from '../channels/build-channel.js';
 import { RUN_STATUSES } from '../db/run-repository.js';
 import { ContentRecorder } from './content-recorder.js';
+import { isCutoverPending } from './cutover-guard.js';
 import { NOT_BEFORE_LABEL, createNotBeforeMiddleware } from './not-before.js';
 
 /** Library reject reason for each selection stage, by stage name. */
@@ -197,7 +198,9 @@ export class ChannelRunExecutor {
    * Run one channel now. Scheduled runs of a disabled or paused channel are
    * skipped without a run record; manual runs of a paused channel are recorded
    * as skipped. A channel found without delivery state is paused first, so no
-   * path can start delivering for a channel that was never paused.
+   * path can start delivering for a channel that was never paused. A cutover
+   * channel whose `notBefore` is unset (cleared after it was resumed) is
+   * skipped without a run record and logged.
    * @param {{
    *   channelId: string,
    *   triggerType: 'scheduled'|'manual',
@@ -221,6 +224,10 @@ export class ChannelRunExecutor {
       return skipped(channelId, 'channel_state_missing');
     }
     if (state.paused === true && triggerType === 'scheduled') return skipped(channelId, 'channel_paused');
+    if (isCutoverPending(record)) {
+      this._logger.warn?.(`[Runtime] ${channelId}: ${triggerType} run skipped; set notBefore (the cutover instant) before this channel delivers`);
+      return skipped(channelId, 'cutover_required');
+    }
 
     const startedAt = this._clock();
     this._runs.start({

@@ -12,6 +12,8 @@
  * - `version_conflict`: stale `expectedVersion` (409).
  * - `target_not_found`: recovery target does not exist for this channel (404).
  * - `control_rejected`: the delivery state machine refused the action (409).
+ * - `cutover_required`: the channel needs its `notBefore` cutover instant
+ *   before it can resume, run, or retry an output (409).
  */
 export class RuntimeError extends Error {
   /**

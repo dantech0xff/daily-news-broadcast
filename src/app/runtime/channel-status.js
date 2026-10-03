@@ -82,6 +82,7 @@ export class ChannelStatusReader {
       cron: record.cron,
       timezone: record.timezone,
       notBefore: record.notBefore,
+      cutoverRequired: record.cutoverRequired === true,
       dailyLimit: record.limits.dailyLimit,
       configVersion: record.version,
       paused: state ? state.paused === true : null,

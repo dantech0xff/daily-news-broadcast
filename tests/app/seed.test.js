@@ -89,11 +89,29 @@ test('an empty database is seeded with a paused telegram-main', async t => {
     },
     telegram: { botTokenCredentialId: null, chatIdCredentialId: null },
     limits: { batchSize: 1, delayMs: 0, dailyLimit: 18, maxArticles: 18, maxArticlesPerSource: 3, concurrency: 5 },
+    cutoverRequired: true,
     version: 1,
     createdAt: SEEDED_AT,
     updatedAt: SEEDED_AT,
     updatedBy: 'system-seed',
   }]);
+});
+
+test('the seeded channel keeps its cutover flag through updates; channels created otherwise never get it', async t => {
+  const { channels, pauseChannel } = await setup(t);
+  await seedDefaultChannels({ channelRepository: channels, pauseChannel, clock });
+
+  // Input cannot clear the flag, and setting notBefore leaves it in place.
+  const updated = channels.update(SEED_CHANNEL_ID, { cutoverRequired: false, notBefore: '2026-10-03T00:00:00Z' }, { expectedVersion: 1, actor: 'ops@example.test' });
+  assert.equal(updated.cutoverRequired, true);
+  assert.equal(updated.notBefore, '2026-10-03T00:00:00.000Z');
+  assert.equal(channels.update(SEED_CHANNEL_ID, { notBefore: null }, { expectedVersion: 2, actor: 'ops@example.test' }).cutoverRequired, true);
+
+  // Input cannot set it either.
+  const other = channels.create({ ...otherChannel('digest-weekly'), cutoverRequired: true }, { actor: 'ops@example.test' });
+  assert.equal(other.cutoverRequired, false);
+  assert.equal(channels.update('digest-weekly', { cutoverRequired: true }, { expectedVersion: 1, actor: 'ops@example.test' }).cutoverRequired, false);
+  assert.throws(() => channels.create(otherChannel('flag-typo'), { actor: 'ops@example.test', cutoverRequired: 'yes' }), TypeError);
 });
 
 test('seeding is idempotent and never touches existing channels', async t => {

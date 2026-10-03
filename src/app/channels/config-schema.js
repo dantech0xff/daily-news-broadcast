@@ -47,6 +47,14 @@ export const LIMIT_RANGES = Object.freeze({
   concurrency: Object.freeze([1, 50]),
 });
 
+/**
+ * Upper bound of `limits.batchSize × limits.delayMs` (10 minutes): roughly the
+ * time one run may spend pausing between posts. Runs of every channel share
+ * one queue, so a longer run would delay other channels' runs and keep a
+ * shutdown waiting.
+ */
+export const MAX_BATCH_DELAY_MS = 600_000;
+
 /** Limits applied when omitted; they mirror the env defaults of `defineChannels()`. */
 export const DEFAULT_LIMITS = Object.freeze({
   batchSize: 5,
@@ -76,8 +84,9 @@ const CHANNEL_KEYS = Object.freeze([
   'id', 'name', 'enabled', 'platform', 'mode', 'cron', 'timezone', 'notBefore',
   'sources', 'prompt', 'ai', 'telegram', 'limits',
 ]);
-// Record metadata that clients may echo back; it is never taken from input.
-const READ_ONLY_KEYS = Object.freeze(['version', 'createdAt', 'updatedAt', 'updatedBy']);
+// Record metadata and system state that clients may echo back; never taken
+// from input (`cutoverRequired` can be neither set nor cleared through the API).
+const READ_ONLY_KEYS = Object.freeze(['version', 'createdAt', 'updatedAt', 'updatedBy', 'cutoverRequired']);
 const PROMPT_KEYS = Object.freeze(['language', 'style', 'audience', 'customSystemPrompt']);
 const AI_KEYS = Object.freeze(['provider', 'model', 'name', 'baseUrl', 'apiKeyCredentialId', 'gateway']);
 const GATEWAY_KEYS = Object.freeze(['accountId', 'gatewayId', 'byokAlias', 'tokenCredentialId']);
@@ -330,10 +339,17 @@ function readTelegram(issues, value) {
 
 function readLimits(issues, value) {
   const limits = readObject(issues, value, 'limits', { allowed: Object.keys(LIMIT_RANGES), required: false }) ?? {};
-  return Object.fromEntries(Object.entries(LIMIT_RANGES).map(([key, [min, max]]) => [
+  const result = Object.fromEntries(Object.entries(LIMIT_RANGES).map(([key, [min, max]]) => [
     key,
     readInteger(issues, limits[key], `limits.${key}`, { min, max, defaultValue: DEFAULT_LIMITS[key] }),
   ]));
+  // Checked only when both values are valid on their own, so one mistake is reported once.
+  if (Number.isSafeInteger(result.batchSize) && Number.isSafeInteger(result.delayMs)
+    && result.batchSize * result.delayMs > MAX_BATCH_DELAY_MS) {
+    issues.add('limits.delayMs', 'batch_delay_too_long',
+      `Tích batchSize × delayMs tối đa ${MAX_BATCH_DELAY_MS} ms (10 phút) để một lượt chạy không giữ hàng đợi chung quá lâu.`);
+  }
+  return result;
 }
 
 function readCredentialId(issues, value, field) {

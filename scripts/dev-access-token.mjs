@@ -16,8 +16,9 @@
  * Issuer and audience come from ACCESS_TEAM_DOMAIN / the first ACCESS_AUD
  * entry when set (shell or `.env`), otherwise from the dev defaults (the app
  * also defaults ACCESS_TEAM_DOMAIN to the dev issuer when ACCESS_JWKS_FILE is
- * set). These keys are for local development only: production
- * (NODE_ENV=production) refuses ACCESS_JWKS_FILE.
+ * set). These keys are for local development only: the app accepts
+ * ACCESS_JWKS_FILE only when NODE_ENV is exactly `development` or `test`, and
+ * refuses to start otherwise (including when NODE_ENV is unset).
  */
 
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -153,6 +154,7 @@ async function main(argv) {
   process.stderr.write([
     `${created ? 'Created a dev signing key. ' : ''}Dev Access token for ${subject}, valid until ${expiresAt.toISOString()}.`,
     'Run the app (development only) with:',
+    '  NODE_ENV=development   (ACCESS_JWKS_FILE is refused unless NODE_ENV is development or test)',
     `  ACCESS_JWKS_FILE=${jwksPath}`,
     `  ACCESS_TEAM_DOMAIN=${issuer}`,
     `  ACCESS_AUD=${audience}`,

@@ -1,6 +1,7 @@
 /**
  * Channel configuration routes. Reads need `viewer`; writes need `operator`
  * plus the mutation guards. Records carry credential ids, never values.
+ * `cutoverRequired` is read-only system state: it is ignored in request bodies.
  * - `GET /api/channels` → `{ channels: ChannelRecord[] }`
  * - `POST /api/channels` (config) → 201 `ChannelRecord` (created paused)
  * - `GET /api/channels/:id` → `ChannelRecord`

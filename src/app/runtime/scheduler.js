@@ -11,9 +11,14 @@
  * - A tick for a channel that is already running or queued is skipped and logged.
  * - `reloadChannel()` re-registers one channel's cron job after a config
  *   change, without a restart.
- * - `stop()` stops accepting work, waits (bounded) for the job in flight, and
- *   releases the lease only once nothing is in flight; otherwise the lease is
- *   left to expire so another instance cannot start mid-run.
+ * - `stop()` stops accepting work and waits (bounded) for the job in flight.
+ *   Work in flight is never cut short: the lease stays renewed until it
+ *   finishes and is released then; `drain()` settles at that point, and only
+ *   then may the database be closed.
+ *
+ * The engine has no cooperative stop between output claims (the only in-run
+ * gate is the durable `paused` flag, which would outlive the restart), so a run
+ * in flight at shutdown runs to completion.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -23,7 +28,13 @@ import { RuntimeError } from './errors.js';
 
 export const DEFAULT_LEASE_TTL_MS = 60_000;
 export const DEFAULT_HEARTBEAT_MS = 15_000;
-export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+/**
+ * How long `stop()` waits for work in flight by default. It covers one drip
+ * item end to end (generation and output steps of up to 25 s each, plus store
+ * commits) with room for a source scan; the container stop grace period must
+ * be longer (see `SHUTDOWN_WAIT_SECONDS` in `config/env.js`).
+ */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 120_000;
 
 const DEFAULT_TIMERS = Object.freeze({
   setInterval: (callback, ms) => setInterval(callback, ms),
@@ -107,6 +118,8 @@ export class RuntimeScheduler {
     /** @type {Set<Promise<unknown>>} */
     this._operations = new Set();
     this._stopping = null;
+    /** @type {Promise<{ released: boolean }>|null} */
+    this._drained = null;
     this._beating = null;
   }
 
@@ -227,15 +240,33 @@ export class RuntimeScheduler {
   }
 
   /**
-   * Stop accepting work, drop queued jobs, wait up to the shutdown timeout
-   * for the running job and tracked operations, and release the lease when
-   * nothing is left in flight.
+   * Stop accepting work (cron jobs are removed, queued jobs dropped) and wait
+   * up to `timeoutMs` for the running job and tracked operations.
+   *
+   * Nothing in flight is cut short. When the wait times out (`timedOut`), the
+   * lease keeps being renewed until the work finishes and is released then;
+   * `drain()` settles at that point. Keep the database open until it does.
    * @param {{ timeoutMs?: number }} [options]
-   * @returns {Promise<{ released: boolean, timedOut: boolean }>}
+   * @returns {Promise<{ released: boolean, timedOut: boolean }>} `released`:
+   *   the lease was released within the wait.
    */
   stop({ timeoutMs = this._shutdownTimeoutMs } = {}) {
     if (!this._stopping) this._stopping = this._stop(timeoutMs);
     return this._stopping;
+  }
+
+  /**
+   * Wait, without a time limit, until nothing started before `stop()` (or a
+   * pause tracked since) is in flight; the runtime lease is released by then
+   * when this instance still held it. Calls `stop()` first when needed.
+   * @returns {Promise<{ released: boolean }>}
+   */
+  async drain() {
+    await this.stop();
+    const { released } = await this._drained;
+    // A pause tracked after that (while the HTTP server was closing) is waited for too.
+    while (this._operations.size > 0) await Promise.allSettled([...this._operations]);
+    return { released };
   }
 
   async _stop(timeoutMs) {
@@ -244,21 +275,64 @@ export class RuntimeScheduler {
     this._heartbeat = null;
     this._unregisterAll();
     this._dropQueued('runtime_stopped');
-    const pending = [this._worker, ...this._operations].filter(Boolean);
-    const timedOut = !(await this._settleWithin(Promise.allSettled(pending), timeoutMs));
+    this._drained = this._drainInFlight();
+    if (!(await this._settleWithin(this._drained, timeoutMs))) {
+      this._logger.warn?.(`[Scheduler] Work is still in flight ${timeoutMs} ms after shutdown began; the runtime lease is kept until it finishes`);
+      return { released: false, timedOut: true };
+    }
+    const { released } = await this._drained;
+    return { released, timedOut: false };
+  }
+
+  // Settles once no job, heartbeat, or tracked operation is in flight, then
+  // releases the lease. Never rejects.
+  async _drainInFlight() {
+    const keeper = this._keepLeaseWhileDraining();
+    try {
+      // Re-check after each wait: a pause may be tracked while shutdown waits.
+      while (this._worker || this._beating || this._operations.size > 0) {
+        await Promise.allSettled([this._worker, this._beating, ...this._operations].filter(Boolean));
+      }
+    } finally {
+      if (keeper !== null) this._timers.clearInterval(keeper);
+    }
     let released = false;
-    if (this._leased && !timedOut) {
+    if (this._leased) {
       try {
         released = this._lease.release(this._ownerId);
       } catch (error) {
         this._logger.error?.(`[Scheduler] Could not release the runtime lease: ${sanitizeRuntimeError(error)}`);
       }
     }
-    if (timedOut) {
-      this._logger.warn?.('[Scheduler] Work still in flight at shutdown; the runtime lease is left to expire');
-    }
     this._leased = false;
-    return { released, timedOut };
+    return { released };
+  }
+
+  // The regular heartbeat is stopped at shutdown (it would also re-acquire the
+  // lease and register cron jobs); this one only renews the lease, so another
+  // instance cannot start a run while this one is still sending.
+  _keepLeaseWhileDraining() {
+    if (!this._leased || (!this._worker && this._operations.size === 0)) return null;
+    try {
+      const handle = this._timers.setInterval(() => this._renewWhileDraining(), this._heartbeatMs);
+      handle?.unref?.();
+      return handle;
+    } catch (error) {
+      this._logger.error?.(`[Scheduler] Could not keep renewing the runtime lease during shutdown: ${sanitizeRuntimeError(error)}`);
+      return null;
+    }
+  }
+
+  _renewWhileDraining() {
+    if (!this._leased) return;
+    try {
+      if (this._lease.renew(this._ownerId, this._leaseTtlMs) === null) {
+        this._leased = false;
+        this._logger.warn?.('[Scheduler] Runtime lease lost while waiting for work in flight; another instance holds it');
+      }
+    } catch (error) {
+      this._logger.error?.(`[Scheduler] Could not renew the runtime lease during shutdown: ${sanitizeRuntimeError(error)}`);
+    }
   }
 
   async _beat() {

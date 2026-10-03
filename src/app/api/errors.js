@@ -15,7 +15,8 @@
  * - 409 state conflicts the caller can resolve by changing state first:
  *   `version_conflict`, `channel_exists`, `channel_busy`, `channel_disabled`,
  *   `channel_not_paused`, `channel_has_unresolved`, `control_rejected`,
- *   `credential_in_use`, `run_skipped`;
+ *   `credential_in_use`, `run_skipped`, `cutover_required` (set the channel's
+ *   `notBefore` before resuming, running, or retrying an output);
  * - 413 `payload_too_large`; 415 `unsupported_media_type`;
  * - 422 the channel's stored config is incomplete: `missing_credential`,
  *   `credential_unavailable` (`details.fields` names the credential slots);
@@ -60,6 +61,7 @@ export const ERROR_MESSAGES = Object.freeze({
   control_rejected: 'Thao tác bị từ chối ở trạng thái hiện tại.',
   credential_in_use: 'Credential đang được kênh sử dụng.',
   run_skipped: 'Lượt chạy bị bỏ qua.',
+  cutover_required: 'Kênh cần đặt mốc cutover (notBefore) trước khi resume, chạy hoặc gửi lại bài, để chỉ bài publish sau mốc này được đăng.',
   missing_credential: 'Kênh thiếu credential bắt buộc.',
   credential_unavailable: 'Không đọc được credential của kênh.',
   runtime_not_leased: 'Instance này chưa giữ runtime lease (có thể một instance khác đang chạy); hãy thử lại sau.',
@@ -85,6 +87,7 @@ const RUNTIME_ERROR_STATUS = Object.freeze({
   channel_has_unresolved: 409,
   version_conflict: 409,
   control_rejected: 409,
+  cutover_required: 409,
   target_not_found: 404,
 });
 

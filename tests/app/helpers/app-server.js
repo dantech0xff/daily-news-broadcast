@@ -85,9 +85,14 @@ export async function signAccessToken(key, {
   return jwt.sign(key);
 }
 
-/** Valid app environment for tests (ephemeral port, test Access issuer/AUD). */
+/**
+ * Valid app environment for tests (ephemeral port, test Access issuer/AUD).
+ * `NODE_ENV=test` is set explicitly: like a real deployment, the app accepts
+ * local signing keys (`ACCESS_JWKS_FILE`) only under development or test.
+ */
 export function appEnv(dataDir, overrides = {}) {
   return {
+    NODE_ENV: 'test',
     HOST: '127.0.0.1',
     PORT: '0',
     DATA_DIR: dataDir,

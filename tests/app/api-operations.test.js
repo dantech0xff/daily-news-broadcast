@@ -199,6 +199,12 @@ test('controls validate input, use the token identity, replay idempotently, and 
 
 test('resume is refused with 422 while the channel lacks credentials', async t => {
   const app = await startTestApp(t);
+  // Past the cutover guard (notBefore set), the missing credentials are what blocks the resume.
+  const record = (await app.api('/api/channels/telegram-main', { as: 'viewer' })).body;
+  const cutover = await app.api('/api/channels/telegram-main', {
+    as: 'operator', method: 'PUT', body: { version: record.version, notBefore: '2026-10-03T08:00:00Z' },
+  });
+  assert.equal(cutover.status, 200, cutover.text);
   const { version } = (await app.api('/api/channels/telegram-main/status', { as: 'viewer' })).body;
   const response = await app.api('/api/channels/telegram-main/control/resume', {
     as: 'operator', method: 'POST', body: { idempotencyKey: 'resume-seed', expectedVersion: version, reason: 'Too early' },
@@ -206,6 +212,100 @@ test('resume is refused with 422 while the channel lacks credentials', async t =
   assert.equal(response.status, 422);
   assert.equal(response.body.error, 'missing_credential');
   assert.equal((await app.api('/api/channels/telegram-main/status', { as: 'viewer' })).body.paused, true);
+});
+
+/** Give the seeded telegram-main every credential it needs (it uses Gemini through the AI Gateway). */
+async function credentialSeedChannel(app) {
+  const ids = await createCredentialsViaApi(app.api);
+  const gateway = await app.api('/api/credentials', {
+    as: 'operator', method: 'POST', body: { label: 'Gateway', kind: 'ai_gateway_token', value: 'gateway-token-secret' },
+  });
+  assert.equal(gateway.status, 201, gateway.text);
+  const record = (await app.api('/api/channels/telegram-main', { as: 'viewer' })).body;
+  const updated = await app.api('/api/channels/telegram-main', {
+    as: 'operator',
+    method: 'PUT',
+    body: {
+      version: record.version,
+      telegram: { botTokenCredentialId: ids.botToken, chatIdCredentialId: ids.chatId },
+      ai: { ...record.ai, gateway: { ...record.ai.gateway, tokenCredentialId: gateway.body.id } },
+    },
+  });
+  assert.equal(updated.status, 200, updated.text);
+  return updated.body;
+}
+
+test('the seeded telegram-main cannot start delivering before its cutover instant is set', async t => {
+  const app = await startTestApp(t, { articles: ARTICLES });
+  const record = await credentialSeedChannel(app);
+  assert.equal(record.cutoverRequired, true);
+  assert.equal(record.notBefore, null);
+  const status = (await app.api('/api/channels/telegram-main/status', { as: 'viewer' })).body;
+  assert.equal(status.cutoverRequired, true);
+  assert.equal(status.paused, true);
+
+  const resume = idempotencyKey => app.api('/api/channels/telegram-main/control/resume', {
+    as: 'operator', method: 'POST', body: { idempotencyKey, expectedVersion: status.version, reason: 'Cutover' },
+  });
+  const refusals = [
+    await resume('resume-before-cutover'),
+    await app.api('/api/channels/telegram-main/run', { as: 'operator', method: 'POST' }),
+    await app.api('/api/channels/telegram-main/control/retry-output', {
+      as: 'operator',
+      method: 'POST',
+      body: { idempotencyKey: 'retry-before-cutover', expectedVersion: 1, deliveryId: 'delivery-1', outputKey: 'output-1', reason: 'Too early' },
+    }),
+  ];
+  for (const refused of refusals) {
+    assert.equal(refused.status, 409, refused.text);
+    assert.equal(refused.body.error, 'cutover_required');
+    assert.match(refused.body.message, /Kênh cần đặt mốc cutover \(notBefore\)/);
+  }
+
+  // The flag is read-only: an update cannot clear it.
+  const cleared = await app.api('/api/channels/telegram-main', {
+    as: 'operator', method: 'PUT', body: { version: record.version, cutoverRequired: false },
+  });
+  assert.equal(cleared.status, 200, cleared.text);
+  assert.equal(cleared.body.cutoverRequired, true);
+  // Preview stays available before the cutover and sends nothing.
+  const preview = await app.api('/api/channels/telegram-main/preview', { as: 'operator', method: 'POST' });
+  assert.equal(preview.status, 200, preview.text);
+  const unchanged = (await app.api('/api/channels/telegram-main/status', { as: 'viewer' })).body;
+  assert.equal(unchanged.paused, true);
+  assert.equal(unchanged.version, status.version, 'the refusals changed no delivery state');
+  assert.equal(app.plugins.output.calls.length, 0);
+
+  // Once notBefore is set the guard passes.
+  const cutover = await app.api('/api/channels/telegram-main', {
+    as: 'operator', method: 'PUT', body: { version: cleared.body.version, notBefore: '2026-10-03T08:00:00Z' },
+  });
+  assert.equal(cutover.status, 200, cutover.text);
+  assert.equal(cutover.body.cutoverRequired, true);
+  const resumed = await resume('resume-after-cutover');
+  assert.equal(resumed.status, 200, resumed.text);
+  assert.equal(resumed.body.paused, false);
+  const run = await app.api('/api/channels/telegram-main/run', { as: 'operator', method: 'POST' });
+  assert.equal(run.status, 202, run.text);
+  assert.equal((await waitForRun(app.api, run.body.runId)).status, 'success');
+  assert.equal(app.plugins.output.calls.length, 1);
+});
+
+test('channels created through the API never need a cutover, even when the body asks for one', async t => {
+  const app = await startTestApp(t, { articles: ARTICLES });
+  const ids = await createCredentialsViaApi(app.api);
+  const created = await app.api('/api/channels', {
+    as: 'operator', method: 'POST', body: { ...channelInput(ids), cutoverRequired: true },
+  });
+  assert.equal(created.status, 201, created.text);
+  assert.equal(created.body.cutoverRequired, false);
+  assert.equal(created.body.notBefore, null);
+  assert.equal((await app.api('/api/channels/telegram-ops/status', { as: 'viewer' })).body.cutoverRequired, false);
+  assert.equal((await resumeViaApi(app.api, 'telegram-ops')).status, 200);
+  const run = await app.api('/api/channels/telegram-ops/run', { as: 'operator', method: 'POST' });
+  assert.equal(run.status, 202, run.text);
+  await waitForRun(app.api, run.body.runId);
+  assert.equal(app.plugins.output.calls.length, 1);
 });
 
 test('unresolved deliveries are listed with their allowed actions and can be abandoned', async t => {

@@ -4,6 +4,10 @@
  * in `config_json`. Every write is validated by the channel schema, checks its
  * credential references in the same transaction, and bumps `version` for
  * optimistic concurrency.
+ *
+ * `cutoverRequired` is system state, not config: only `create()`'s
+ * `cutoverRequired` option (the seed) sets it, input never does, and updates
+ * leave it unchanged.
  */
 
 import { ChannelValidationError, listCredentialReferences, validateChannelConfig } from './config-schema.js';
@@ -11,7 +15,7 @@ import { isPlainObject, requireActor } from './validation.js';
 
 const SELECT_CHANNEL_SQL = `
   SELECT id, name, enabled, platform, mode, cron, timezone, config_json, not_before,
-         version, created_at, updated_at, updated_by
+         cutover_required, version, created_at, updated_at, updated_by
   FROM app_channels
 `;
 
@@ -45,11 +49,13 @@ export class ChannelConflictError extends Error {
 
 /**
  * @typedef {import('./config-schema.js').ChannelConfig & {
+ *   cutoverRequired: boolean,
  *   version: number,
  *   createdAt: string,
  *   updatedAt: string,
  *   updatedBy: string|null,
- * }} ChannelRecord
+ * }} ChannelRecord `cutoverRequired` (read-only): the channel may not start
+ *   delivering until `notBefore` is set.
  */
 
 export class ChannelRepository {
@@ -84,12 +90,14 @@ export class ChannelRepository {
 
   /**
    * @param {unknown} input Channel config; see `validateChannelConfig()`.
-   * @param {{ actor: string, now?: Date }} options
+   * @param {{ actor: string, now?: Date, cutoverRequired?: boolean }} options
+   *   `cutoverRequired`: system use only (the seed); API input never sets it.
    * @returns {ChannelRecord} Version 1.
    * @throws {ChannelValidationError|ChannelConflictError}
    */
-  create(input, { actor, now } = {}) {
+  create(input, { actor, now, cutoverRequired = false } = {}) {
     const updatedBy = requireActor(actor);
+    if (typeof cutoverRequired !== 'boolean') throw new TypeError('cutoverRequired must be a boolean');
     const config = validateChannelConfig(input);
     const timestamp = this._timestamp(now);
     this._storage.transactionSync(() => {
@@ -98,10 +106,10 @@ export class ChannelRepository {
       this._storage.sql.exec(
         `INSERT INTO app_channels(
           id, name, enabled, platform, mode, cron, timezone, config_json, not_before,
-          version, created_at, updated_at, updated_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          cutover_required, version, created_at, updated_at, updated_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         config.id, config.name, config.enabled, config.platform, config.mode, config.cron, config.timezone,
-        serializeConfig(config), config.notBefore, timestamp, timestamp, updatedBy,
+        serializeConfig(config), config.notBefore, cutoverRequired, timestamp, timestamp, updatedBy,
       );
     });
     return this.get(config.id);
@@ -227,6 +235,7 @@ function toRecord(row) {
     ai: config.ai,
     telegram: config.telegram,
     limits: config.limits,
+    cutoverRequired: Boolean(row.cutover_required),
     version: row.version,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

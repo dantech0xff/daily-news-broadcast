@@ -10,13 +10,16 @@
  * - Every channel is paused in the delivery store before its config row is
  *   written (create and seed), so no path creates an unpaused channel.
  * - Resume is refused unless the channel builds with all its credentials.
+ * - A cutover channel (`cutoverRequired`, the seeded `telegram-main`) cannot
+ *   resume, run, or retry an output until its `notBefore` is set.
  * - Runs, and every control except pause, need the single-instance runtime
  *   lease; pause is always allowed because it only stops delivery.
  * - Output paths use a persistent file cache, never `MemoryCache`.
  *
  * Expected start-up order (API layer): open the database and run migrations,
  * `await createRuntime(...)`, `seedDefaultChannels()`, start listening, then
- * `start()`; on SIGTERM call `stop()` before closing the database.
+ * `start()`; on SIGTERM call `stop()`, then close the database only after
+ * `drain()` settles (a run in flight is never cut short).
  */
 
 import { randomUUID } from 'node:crypto';
@@ -40,6 +43,7 @@ import { CredentialRepository } from '../secrets/credential-repository.js';
 import { ChannelStatusReader } from './channel-status.js';
 import { ContentSync } from './content-sync.js';
 import { ChannelControls, NEW_CHANNEL_PAUSE_REASON, SYSTEM_OPERATOR_ID } from './controls.js';
+import { assertCutoverReady } from './cutover-guard.js';
 import { RuntimeError } from './errors.js';
 import { RuntimeEvents } from './events.js';
 import {
@@ -241,14 +245,27 @@ export async function createRuntime({
       start: () => scheduler.start(),
 
       /**
-       * Stop scheduling, wait (bounded) for in-flight work, and release the
-       * lease when nothing is left in flight.
+       * Stop scheduling and wait (bounded) for in-flight work. Work in flight
+       * is never cut short: on `timedOut` it keeps running with the lease
+       * renewed; `drain()` settles when it is done.
        * @param {{ timeoutMs?: number }} [options]
        * @returns {Promise<{ released: boolean, timedOut: boolean }>}
        */
       stop: options => {
         stopped = true;
         return scheduler.stop(options);
+      },
+
+      /**
+       * Wait, without a time limit, until no run or control started before
+       * (or tracked during) shutdown is in flight; the runtime lease is
+       * released by then. Close the database only after this settles. Calls
+       * `stop()` first when needed.
+       * @returns {Promise<{ released: boolean }>}
+       */
+      drain: () => {
+        stopped = true;
+        return scheduler.drain();
       },
 
       /**
@@ -425,7 +442,8 @@ export async function createRuntime({
 
       /**
        * Manual trigger: an ordinary run that bypasses the cron schedule (not a
-       * force run), queued behind any run in progress.
+       * force run), queued behind any run in progress. Refused with
+       * `cutover_required` while a cutover channel's `notBefore` is unset.
        * @param {string} channelId
        * @param {string} actor
        * @param {{ wait?: boolean }} [options] `wait` resolves with the finished run.
@@ -437,6 +455,7 @@ export async function createRuntime({
         const triggeredBy = requireActor(actor);
         const record = requireChannel(channelId);
         if (!record.enabled) throw new RuntimeError('channel_disabled', `Channel "${record.id}" is disabled`);
+        assertCutoverReady(record);
         requireActive();
         const queued = scheduler.enqueueRun({
           channelId: record.id,

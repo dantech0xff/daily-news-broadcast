@@ -119,6 +119,7 @@ test('channel status reports delivery state, queue counts, the last run, and unr
     cron: '0 * * * *',
     timezone: 'Asia/Singapore',
     notBefore: null,
+    cutoverRequired: false,
     dailyLimit: 5,
     configVersion: 1,
     paused: false,

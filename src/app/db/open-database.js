@@ -6,6 +6,8 @@ export const DATABASE_FILE_NAME = 'content-radar.db';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const MAX_BUSY_TIMEOUT_MS = 60_000;
+/** `PRAGMA synchronous` reports FULL as 2. */
+const SYNCHRONOUS_FULL = 2;
 
 /**
  * Resolve the absolute data directory, rejecting empty or non-string paths.
@@ -29,9 +31,15 @@ export function resolveDatabasePath(dataDir) {
 
 /**
  * Open (creating if needed) `${dataDir}/content-radar.db` with WAL journaling,
- * foreign keys, a busy timeout, and `synchronous=NORMAL`. The data directory is
+ * foreign keys, a busy timeout, and `synchronous=FULL`. The data directory is
  * created owner-only and a new database file is created readable by its owner
  * only; SQLite gives its WAL and shared-memory files the same permissions.
+ *
+ * `FULL` makes every commit durable (WAL fsync) before the call returns, so
+ * the output claim committed before a send survives a host crash or power
+ * loss. With `NORMAL` both the claim and the result could roll back after a
+ * successful send, and the item would be posted again. A run makes only a
+ * few commits, so the cost is negligible.
  *
  * @param {{ dataDir: string, busyTimeoutMs?: number }} options
  * @returns {DatabaseSync}
@@ -53,7 +61,11 @@ export function openDatabase({ dataDir, busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS 
       throw new Error(`SQLite could not enable WAL journaling (journal_mode=${journalMode})`);
     }
     db.exec('PRAGMA foreign_keys = ON');
-    db.exec('PRAGMA synchronous = NORMAL');
+    db.exec('PRAGMA synchronous = FULL');
+    const synchronous = db.prepare('PRAGMA synchronous').get()?.synchronous;
+    if (synchronous !== SYNCHRONOUS_FULL) {
+      throw new Error(`SQLite could not enable synchronous=FULL (synchronous=${synchronous})`);
+    }
   } catch (error) {
     db.close();
     throw error;

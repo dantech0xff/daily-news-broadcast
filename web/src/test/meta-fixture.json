@@ -688,7 +688,8 @@
       "maxArticles": 12,
       "maxArticlesPerSource": 3,
       "concurrency": 5
-    }
+    },
+    "maxBatchDelayMs": 600000
   },
   "credentials": {
     "kinds": [

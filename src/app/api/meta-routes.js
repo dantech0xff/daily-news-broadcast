@@ -27,6 +27,7 @@ import {
   DEFAULT_LIMITS,
   LIMIT_RANGES,
   MAX_AUDIENCE_LENGTH,
+  MAX_BATCH_DELAY_MS,
   MAX_CUSTOM_SYSTEM_PROMPT_LENGTH,
   aiCredentialRequirements,
 } from '../channels/config-schema.js';
@@ -176,6 +177,8 @@ export function buildDashboardMeta() {
     limits: {
       ranges: Object.fromEntries(Object.entries(LIMIT_RANGES).map(([key, [min, max]]) => [key, { min, max }])),
       defaults: { ...DEFAULT_LIMITS },
+      // Upper bound of batchSize × delayMs (reported on `limits.delayMs`).
+      maxBatchDelayMs: MAX_BATCH_DELAY_MS,
     },
     credentials: {
       kinds: [...CREDENTIAL_KINDS],

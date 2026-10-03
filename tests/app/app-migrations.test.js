@@ -28,12 +28,15 @@ import { createTempDataDir } from './helpers/temp-data-dir.js';
 
 const POSIX = process.platform !== 'win32';
 const MIGRATED_AT = new Date('2026-10-03T04:05:06.789Z');
+/** Version of the newest app migration this build ships. */
+const LATEST = APP_MIGRATIONS.length;
+const LATEST_VERSIONS = APP_MIGRATIONS.map(migration => migration.version);
 
 const EXPECTED_COLUMNS = {
   app_settings: ['key', 'value', 'updated_at'],
   app_channels: [
     'id', 'name', 'enabled', 'platform', 'mode', 'cron', 'timezone', 'config_json',
-    'not_before', 'version', 'created_at', 'updated_at', 'updated_by',
+    'not_before', 'version', 'created_at', 'updated_at', 'updated_by', 'cutover_required',
   ],
   app_credentials: [
     'id', 'label', 'kind', 'ciphertext', 'iv', 'auth_tag', 'key_fingerprint',
@@ -66,12 +69,13 @@ const EXPECTED_INDEXES = {
   app_content_items_source: ['source_id'],
 };
 
-const V2_MIGRATION = Object.freeze({
-  version: 2,
+/** A migration a future build could add after the shipped ones. */
+const NEXT_MIGRATION = Object.freeze({
+  version: LATEST + 1,
   name: 'add-settings-note',
   sql: `
     ALTER TABLE app_settings ADD COLUMN note TEXT;
-    CREATE TABLE app_v2_marker (id TEXT PRIMARY KEY);
+    CREATE TABLE app_next_marker (id TEXT PRIMARY KEY);
   `,
 });
 
@@ -115,7 +119,8 @@ test('openDatabase creates a private data directory and applies the connection p
     assert.deepEqual(rows(db, 'PRAGMA journal_mode'), [{ journal_mode: 'wal' }]);
     assert.deepEqual(rows(db, 'PRAGMA foreign_keys'), [{ foreign_keys: 1 }]);
     assert.deepEqual(rows(db, 'PRAGMA busy_timeout'), [{ timeout: 5_000 }]);
-    assert.deepEqual(rows(db, 'PRAGMA synchronous'), [{ synchronous: 1 }]);
+    // FULL (2): a commit, such as the claim before a send, is durable on disk before the call returns.
+    assert.deepEqual(rows(db, 'PRAGMA synchronous'), [{ synchronous: 2 }]);
 
     createNodeSqlStorage(db).sql.exec('CREATE TABLE probe (id INTEGER)');
     if (POSIX) {
@@ -149,18 +154,24 @@ test('closeDatabase is idempotent and accepts missing connections', async t => {
   assert.throws(() => db.prepare('SELECT 1'), /not open/);
 });
 
-test('a brand-new database gets the v1 app schema and no backup', async t => {
+test('a brand-new database gets the full app schema and no backup', async t => {
   const workspace = await createTempDataDir(t);
   const db = workspace.open();
 
   const result = runAppMigrations({ db, dataDir: workspace.dataDir, now: MIGRATED_AT });
   assert.deepEqual(result, {
     fromVersion: 0,
-    toVersion: 1,
-    applied: [{ version: 1, name: 'create-app-tables' }],
+    toVersion: LATEST,
+    applied: [
+      { version: 1, name: 'create-app-tables' },
+      { version: 2, name: 'add-channel-cutover-guard' },
+    ],
     backupPath: null,
   });
-  assert.deepEqual(ledger(db), [{ version: 1, name: 'create-app-tables', applied_at: MIGRATED_AT.toISOString() }]);
+  assert.deepEqual(ledger(db), [
+    { version: 1, name: 'create-app-tables', applied_at: MIGRATED_AT.toISOString() },
+    { version: 2, name: 'add-channel-cutover-guard', applied_at: MIGRATED_AT.toISOString() },
+  ]);
   assert.deepEqual(await listBackups(workspace.dataDir), []);
 
   for (const [table, columns] of Object.entries(EXPECTED_COLUMNS)) {
@@ -187,8 +198,8 @@ test('v1 columns carry the specified defaults and uniqueness rules', async t => 
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `, 'telegram-main', 'Telegram', 'drip', '*/15 * * * *', 'Asia/Ho_Chi_Minh', '{"sources":[]}', at, at);
   assert.deepEqual(
-    sql.exec('SELECT enabled, platform, version, not_before, updated_by FROM app_channels').one(),
-    { enabled: 1, platform: 'telegram', version: 1, not_before: null, updated_by: null },
+    sql.exec('SELECT enabled, platform, version, not_before, updated_by, cutover_required FROM app_channels').one(),
+    { enabled: 1, platform: 'telegram', version: 1, not_before: null, updated_by: null, cutover_required: 0 },
   );
 
   sql.exec(`
@@ -220,13 +231,39 @@ test('rerunning migrations is a no-op', async t => {
   insertSetting(db);
 
   assert.deepEqual(runAppMigrations({ db, dataDir: workspace.dataDir }), {
-    fromVersion: 1,
-    toVersion: 1,
+    fromVersion: LATEST,
+    toVersion: LATEST,
     applied: [],
     backupPath: null,
   });
-  assert.equal(ledger(db).length, 1);
+  assert.equal(ledger(db).length, LATEST);
   assert.deepEqual(await listBackups(workspace.dataDir), []);
+});
+
+test('the cutover-guard migration marks only a telegram-main row whose cutoff is still unset', async t => {
+  for (const [notBefore, expected] of [[null, 1], ['2026-10-03T00:00:00.000Z', 0]]) {
+    const workspace = await createTempDataDir(t);
+    const db = workspace.open();
+    runAppMigrations({ db, dataDir: workspace.dataDir, migrations: APP_MIGRATIONS.slice(0, 1), now: MIGRATED_AT });
+    const { sql } = createNodeSqlStorage(db);
+    const at = MIGRATED_AT.toISOString();
+    for (const id of ['telegram-main', 'telegram-ops']) {
+      sql.exec(`
+        INSERT INTO app_channels(id, name, mode, cron, timezone, config_json, not_before, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, id, id, 'drip', '0 * * * *', 'UTC', '{"sources":[]}', notBefore, at, at);
+    }
+
+    const upgradeAt = new Date('2026-10-04T00:00:00.000Z');
+    const result = runAppMigrations({ db, dataDir: workspace.dataDir, now: upgradeAt });
+    assert.deepEqual(result.applied, [{ version: 2, name: 'add-channel-cutover-guard' }]);
+    assert.equal(result.backupPath, join(workspace.dataDir, BACKUP_DIRECTORY_NAME, backupName('v1', upgradeAt)));
+    assert.deepEqual(
+      sql.exec('SELECT id, cutover_required FROM app_channels ORDER BY id').toArray(),
+      [{ id: 'telegram-main', cutover_required: expected }, { id: 'telegram-ops', cutover_required: 0 }],
+      `not_before=${notBefore}`,
+    );
+  }
 });
 
 test('pending migrations on a database with data run after a VACUUM INTO backup of the old schema', async t => {
@@ -239,25 +276,25 @@ test('pending migrations on a database with data run after a VACUUM INTO backup 
   const result = runAppMigrations({
     db,
     dataDir: workspace.dataDir,
-    migrations: [...APP_MIGRATIONS, V2_MIGRATION],
+    migrations: [...APP_MIGRATIONS, NEXT_MIGRATION],
     now: upgradeAt,
   });
-  const expectedBackup = join(workspace.dataDir, BACKUP_DIRECTORY_NAME, backupName('v1', upgradeAt));
+  const expectedBackup = join(workspace.dataDir, BACKUP_DIRECTORY_NAME, backupName(`v${LATEST}`, upgradeAt));
   assert.deepEqual(result, {
-    fromVersion: 1,
-    toVersion: 2,
-    applied: [{ version: 2, name: 'add-settings-note' }],
+    fromVersion: LATEST,
+    toVersion: LATEST + 1,
+    applied: [{ version: LATEST + 1, name: 'add-settings-note' }],
     backupPath: expectedBackup,
   });
-  assert.deepEqual(ledger(db).map(row => row.version), [1, 2]);
-  assert.ok(tableExists(db, 'app_v2_marker'));
+  assert.deepEqual(ledger(db).map(row => row.version), [...LATEST_VERSIONS, LATEST + 1]);
+  assert.ok(tableExists(db, 'app_next_marker'));
 
   if (POSIX) assert.equal(statSync(expectedBackup).mode & 0o777, 0o600);
   const backup = new DatabaseSync(expectedBackup);
   try {
     assert.deepEqual(rows(backup, 'SELECT key, value FROM app_settings'), [{ key: 'theme', value: 'dark' }]);
-    assert.deepEqual(ledger(backup).map(row => row.version), [1]);
-    assert.equal(tableExists(backup, 'app_v2_marker'), false);
+    assert.deepEqual(ledger(backup).map(row => row.version), LATEST_VERSIONS);
+    assert.equal(tableExists(backup, 'app_next_marker'), false);
     assert.equal(rows(backup, 'PRAGMA table_info(app_settings)').some(row => row.name === 'note'), false);
   } finally {
     backup.close();
@@ -271,7 +308,7 @@ test('a failing migration rolls back atomically and keeps the backup taken befor
   insertSetting(db);
 
   const broken = {
-    version: 2,
+    version: LATEST + 1,
     name: 'broken-migration',
     sql: 'CREATE TABLE app_partial (id TEXT); INSERT INTO missing_table VALUES (1);',
   };
@@ -280,18 +317,18 @@ test('a failing migration rolls back atomically and keeps the backup taken befor
     /no such table: missing_table/,
   );
   assert.equal(tableExists(db, 'app_partial'), false);
-  assert.deepEqual(ledger(db).map(row => row.version), [1]);
-  assert.deepEqual(await listBackups(workspace.dataDir), [backupName('v1')]);
+  assert.deepEqual(ledger(db).map(row => row.version), LATEST_VERSIONS);
+  assert.deepEqual(await listBackups(workspace.dataDir), [backupName(`v${LATEST}`)]);
 
   const retryAt = new Date('2026-10-03T05:00:00.000Z');
   const retried = runAppMigrations({
     db,
     dataDir: workspace.dataDir,
-    migrations: [...APP_MIGRATIONS, V2_MIGRATION],
+    migrations: [...APP_MIGRATIONS, NEXT_MIGRATION],
     now: retryAt,
   });
-  assert.deepEqual(retried.applied, [{ version: 2, name: 'add-settings-note' }]);
-  assert.deepEqual(await listBackups(workspace.dataDir), [backupName('v1'), backupName('v1', retryAt)]);
+  assert.deepEqual(retried.applied, [{ version: LATEST + 1, name: 'add-settings-note' }]);
+  assert.deepEqual(await listBackups(workspace.dataDir), [backupName(`v${LATEST}`), backupName(`v${LATEST}`, retryAt)]);
 });
 
 test('a failed backup aborts the migration and leaves no partial backup file', async t => {
@@ -305,11 +342,11 @@ test('a failed backup aborts the migration and leaves no partial backup file', a
   assert.throws(() => runAppMigrations({
     db,
     dataDir: workspace.dataDir,
-    migrations: [...APP_MIGRATIONS, V2_MIGRATION],
+    migrations: [...APP_MIGRATIONS, NEXT_MIGRATION],
     now: MIGRATED_AT,
   }), error => ['EEXIST', 'ENOTDIR'].includes(error.code));
-  assert.deepEqual(ledger(db).map(row => row.version), [1]);
-  assert.equal(tableExists(db, 'app_v2_marker'), false);
+  assert.deepEqual(ledger(db).map(row => row.version), LATEST_VERSIONS);
+  assert.equal(tableExists(db, 'app_next_marker'), false);
   await rm(backupsPath);
 
   createNodeSqlStorage(db).transactionSync(() => {
@@ -368,14 +405,14 @@ test('refuses a database migrated by a newer build without taking a backup', asy
   insertSetting(db);
   createNodeSqlStorage(db).sql.exec(
     'INSERT INTO app_schema_migrations(version, name, applied_at) VALUES (?, ?, ?)',
-    2,
+    LATEST + 1,
     'from-the-future',
     MIGRATED_AT.toISOString(),
   );
 
   assert.throws(
     () => runAppMigrations({ db, dataDir: workspace.dataDir }),
-    /migration v2, which this build does not know/,
+    new RegExp(`migration v${LATEST + 1}, which this build does not know`),
   );
   assert.deepEqual(await listBackups(workspace.dataDir), []);
 });

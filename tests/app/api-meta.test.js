@@ -10,6 +10,7 @@ import {
   ChannelValidationError,
   DEFAULT_LIMITS,
   LIMIT_RANGES,
+  MAX_BATCH_DELAY_MS,
   validateChannelConfig,
 } from '../../src/app/channels/config-schema.js';
 import { PRESET_NAMES, SOURCE_TYPES } from '../../src/app/channels/source-factories.js';
@@ -245,6 +246,18 @@ test('AI provider rules match channel validation', () => {
   assert.deepEqual(aiIssues({ provider: 'claude', model: 'claude sonnet' }), [['ai.model', 'invalid_format']]);
   assert.deepEqual(aiIssues({ provider: 'claude', model: 'a'.repeat(META.ai.modelMaxLength + 1) }), [['ai.model', 'too_long']]);
   assert.deepEqual(aiIssues({ provider: 'custom', baseUrl: 'https://llm.example.test', name: 'a'.repeat(META.ai.nameMaxLength + 1) }), [['ai.name', 'too_long']]);
+});
+
+test('the batchSize × delayMs bound matches channel validation', () => {
+  const max = META.limits.maxBatchDelayMs;
+  assert.equal(max, MAX_BATCH_DELAY_MS);
+  const withLimits = (batchSize, delayMs) => channelInput({ limits: { batchSize, delayMs } });
+  // Both directions: exactly the bound passes, one millisecond more fails.
+  assert.deepEqual(issuesOf(withLimits(1, max)), []);
+  assert.deepEqual(issuesOf(withLimits(1, max + 1)), [['limits.delayMs', 'batch_delay_too_long']]);
+  assert.deepEqual(issuesOf(withLimits(10, max / 10)), []);
+  assert.deepEqual(issuesOf(withLimits(10, max / 10 + 1)), [['limits.delayMs', 'batch_delay_too_long']]);
+  assert.ok(max < META.limits.ranges.batchSize.max * META.limits.ranges.delayMs.max, 'the bound is tighter than the per-field ranges');
 });
 
 test('channel and prompt bounds and defaults match channel validation', () => {

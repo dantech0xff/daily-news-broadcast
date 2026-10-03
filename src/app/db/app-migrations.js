@@ -137,6 +137,19 @@ export const APP_MIGRATIONS = Object.freeze([
       );
     `,
   }),
+  // `cutover_required` is system-managed (never taken from API input): such a
+  // channel may not start delivering until `not_before` is set. The seed sets
+  // it for `telegram-main`, which takes over from the Cloudflare Worker; a
+  // `telegram-main` row written before this column existed gets it too while
+  // its cutoff is still unset.
+  Object.freeze({
+    version: 2,
+    name: 'add-channel-cutover-guard',
+    sql: `
+      ALTER TABLE app_channels ADD COLUMN cutover_required INTEGER NOT NULL DEFAULT 0;
+      UPDATE app_channels SET cutover_required = 1 WHERE id = 'telegram-main' AND not_before IS NULL;
+    `,
+  }),
 ]);
 
 /**

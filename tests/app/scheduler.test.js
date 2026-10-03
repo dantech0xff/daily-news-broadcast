@@ -238,22 +238,93 @@ test('shutdown waits for the run in flight, drops queued runs, and then releases
   await assert.rejects(env.scheduler.start(), /stopped/);
 });
 
-test('a run that outlives the shutdown timeout keeps the lease until it expires', async t => {
+test('a run that outlives the shutdown wait keeps the lease renewed and releases it once it finishes', async t => {
   const storage = await leaseStorage(t);
   const clock = mutableClock('2026-10-03T09:00:00.000Z');
-  const env = createScheduler({ storage, clock, channels: [channel('stuck')] });
+  const env = createScheduler({ storage, clock, channels: [channel('slow')] });
   await env.scheduler.start();
-  env.cron.fire('stuck');
+  env.cron.fire('slow');
   await flush();
 
   const stopping = env.scheduler.stop();
   await flush();
   env.timers.fireTimeouts();
-
   assert.deepEqual(await stopping, { released: false, timedOut: true });
-  assert.equal(new RuntimeLease({ storage, clock }).current().ownerId, 'owner-a');
-  assert.ok(env.logs.some(line => /left to expire/.test(line)));
+  assert.ok(env.logs.some(line => /still in flight .*lease is kept until it finishes/.test(line)));
+
+  // Past the TTL the run had at shutdown, the lease is still this instance's.
+  const lease = new RuntimeLease({ storage, clock });
+  clock.advance(TTL_MS - 1_000);
+  await env.timers.runIntervals();
+  clock.advance(TTL_MS - 1_000);
+  assert.equal(lease.current().ownerId, 'owner-a');
+  assert.equal(new RuntimeLease({ storage, clock }).acquire('owner-b', TTL_MS).acquired, false, 'no other instance can start a run mid-send');
+  assert.equal(env.cron.active().size, 0, 'renewing the lease does not schedule anything again');
+
+  let drained = null;
+  const draining = env.scheduler.drain().then(result => { drained = result; });
+  await flush();
+  assert.equal(drained, null, 'drain waits for the run in flight');
   env.runs[0].gate.resolve({ status: 'success' });
+  await draining;
+  assert.deepEqual(drained, { released: true });
+  assert.equal(lease.current(), null, 'the lease is released once the run finishes');
+  assert.equal(env.timers.intervals.size, 0, 'no timer is left behind');
+  assert.equal(env.runs.length, 1);
+});
+
+test('a lease taken over during shutdown is not released by the stopping instance', async t => {
+  const storage = await leaseStorage(t);
+  const clock = mutableClock('2026-10-03T09:00:00.000Z');
+  const env = createScheduler({ storage, clock, channels: [channel('slow')] });
+  await env.scheduler.start();
+  env.cron.fire('slow');
+  await flush();
+  const stopping = env.scheduler.stop();
+  await flush();
+  env.timers.fireTimeouts();
+  await stopping;
+
+  // The keeper did not run in time (a stalled process): the lease expired and owner-b took it.
+  clock.advance(TTL_MS + 1);
+  assert.equal(new RuntimeLease({ storage, clock }).acquire('owner-b', TTL_MS).acquired, true);
+  await env.timers.runIntervals();
+  assert.ok(env.logs.some(line => /lease lost while waiting/.test(line)));
+
+  env.runs[0].gate.resolve({ status: 'success' });
+  assert.deepEqual(await env.scheduler.drain(), { released: false });
+  assert.equal(new RuntimeLease({ storage, clock }).current().ownerId, 'owner-b');
+});
+
+test('shutdown also waits for operator operations tracked while it waits', async t => {
+  const storage = await leaseStorage(t);
+  const clock = mutableClock('2026-10-03T09:00:00.000Z');
+  const env = createScheduler({ storage, clock, channels: [channel('first')] });
+  await env.scheduler.start();
+  env.cron.fire('first');
+  await flush();
+
+  let stopped = false;
+  const stopping = env.scheduler.stop().then(result => { stopped = true; return result; });
+  const pause = deferred();
+  env.scheduler.track(pause.promise);
+  env.runs[0].gate.resolve({ status: 'success' });
+  await flush();
+  await flush();
+  assert.equal(stopped, false, 'a pause tracked during shutdown is still in flight');
+  pause.resolve();
+  assert.deepEqual(await stopping, { released: true, timedOut: false });
+
+  // A pause tracked after the wait (while the HTTP server closes) is covered by drain().
+  const late = deferred();
+  env.scheduler.track(late.promise);
+  let drained = false;
+  const draining = env.scheduler.drain().then(() => { drained = true; });
+  await flush();
+  assert.equal(drained, false);
+  late.resolve();
+  await draining;
+  assert.equal(drained, true);
 });
 
 test('lease acquisition runs the start-up hook once and queues maintenance; the heartbeat queues it when due', async t => {

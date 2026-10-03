@@ -318,3 +318,37 @@ test('a scheduled tick runs the channel with the scheduled trigger', async t => 
   assert.equal(env.runtime.getRun(event.data.runId).triggerType, 'scheduled');
   assert.equal(env.plugins.output.calls.length, 1);
 });
+
+test('a cutover channel delivers nothing while its notBefore is unset, even after it was resumed', async t => {
+  const warnings = [];
+  const env = await started(t, {
+    articles: [techArticle('rust-2', 'Rust 2.0 compiler ships async closures')],
+    logger: { log() {}, warn: message => warnings.push(String(message)), error() {} },
+  });
+  await env.runtime.seedDefaultChannels();
+  const gatewayToken = env.credentials.create({ label: 'Gateway', kind: 'ai_gateway_token', value: 'fake-gateway-token', actor: OPERATOR }).id;
+  const seeded = env.runtime.getChannel('telegram-main');
+  const ready = await env.runtime.updateChannel('telegram-main', {
+    version: seeded.version,
+    notBefore: '2026-10-03T00:00:00Z',
+    telegram: { botTokenCredentialId: env.credentialIds.botToken, chatIdCredentialId: env.credentialIds.chatId },
+    ai: { ...seeded.ai, gateway: { ...seeded.ai.gateway, tokenCredentialId: gatewayToken } },
+  }, OPERATOR);
+  const { version } = await env.runtime.getStatus('telegram-main');
+  await env.runtime.control('telegram-main', 'resume', { idempotencyKey: 'resume-main', expectedVersion: version, reason: 'Cutover approved' }, OPERATOR);
+
+  // The cutover instant is cleared after the channel was resumed.
+  await env.runtime.updateChannel('telegram-main', { version: ready.version, notBefore: null }, OPERATOR);
+  assert.equal((await env.runtime.getStatus('telegram-main')).paused, false);
+  await assert.rejects(env.runtime.runNow('telegram-main', OPERATOR), { code: 'cutover_required' });
+  env.cron.fire('telegram-main', '2026-10-03T08:00:00.000Z');
+  for (let turn = 0; turn < 200 && !warnings.some(line => line.includes('telegram-main')); turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  await env.runtime.stop();
+
+  assert.equal(env.plugins.source.calls, 0);
+  assert.equal(env.plugins.output.calls.length, 0);
+  assert.equal(env.runtime.listRuns('telegram-main').page.total, 0);
+  assert.ok(warnings.some(line => /telegram-main: scheduled run skipped; set notBefore/.test(line)), warnings.join('\n'));
+});

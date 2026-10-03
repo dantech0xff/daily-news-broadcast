@@ -9,10 +9,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { AppConfigError } from '../../src/app/config/env.js';
+import { APP_MIGRATIONS } from '../../src/app/db/app-migrations.js';
+import { createNodeSqlStorage } from '../../src/app/db/node-sql-storage.js';
 import { closeDatabase, openDatabase } from '../../src/app/db/open-database.js';
 import { startServer } from '../../src/app/server.js';
 import { VaultKeyError } from '../../src/app/secrets/vault.js';
 import { MemoryCache } from '../../src/core/caches.js';
+import { DeliveryStateMachine } from '../../src/core/delivery-state-machine.js';
+import { SQLiteDeliveryStore } from '../../src/core/sqlite-delivery-store.js';
 import { RecordingAI, RecordingOutput, RecordingSource } from '../helpers/fakes.js';
 import {
   appEnv,
@@ -62,13 +66,24 @@ function readLeaseRows(dataDir) {
   }
 }
 
-test('ACCESS_JWKS_FILE is refused in production before the data directory is touched', async t => {
+async function waitUntil(condition, { timeoutMs = 5_000, message = 'condition was not met' } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) assert.fail(message);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
+
+test('ACCESS_JWKS_FILE is refused unless NODE_ENV is development or test, before the data directory is touched', async t => {
   const directory = await tempDir(t);
   const dataDir = join(directory, 'data');
-  await assert.rejects(
-    startServer(appEnv(dataDir, { NODE_ENV: 'production', ACCESS_JWKS_FILE: join(directory, 'jwks.json') }), { process: null }),
-    error => error instanceof AppConfigError && /ACCESS_JWKS_FILE/.test(error.message),
-  );
+  for (const nodeEnv of ['production', 'prod', undefined]) {
+    await assert.rejects(
+      startServer(appEnv(dataDir, { NODE_ENV: nodeEnv, ACCESS_JWKS_FILE: join(directory, 'jwks.json') }), { process: null }),
+      error => error instanceof AppConfigError && /ACCESS_JWKS_FILE/.test(error.message),
+      `NODE_ENV=${nodeEnv}`,
+    );
+  }
   assert.equal(existsSync(dataDir), false);
 });
 
@@ -120,7 +135,7 @@ test('an in-memory cache is refused for the output path and startup cleans up', 
 test('a restart keeps data and repeats neither migrations nor the seed', async t => {
   const dataDir = await tempDir(t);
   const first = await start(dataDir);
-  assert.ok(first.logs.some(line => /Applied app schema migrations v0 → v1/.test(line)));
+  assert.ok(first.logs.some(line => line.includes(`Applied app schema migrations v0 → v${APP_MIGRATIONS.length}`)));
   assert.ok(first.logs.some(line => /Seeded telegram-main/.test(line)));
   const token = await first.signer.sign({ email: 'ops@example.test' }, { now: new Date('2026-10-03T08:00:00.000Z') });
   const api = createApiClient(first.server.url, { operator: token });
@@ -200,6 +215,86 @@ test('shutdown waits for the run in flight to commit before closing the database
   } finally {
     closeDatabase(db);
   }
+});
+
+test('a send that outlives the shutdown wait is committed as delivered, never left ambiguous', async t => {
+  // A slow Telegram send is in flight when SIGTERM arrives and outlasts the shutdown wait.
+  let releaseSend;
+  const sendGate = new Promise(resolve => { releaseSend = resolve; });
+  let sendStarted;
+  const sending = new Promise(resolve => { sendStarted = resolve; });
+  class SlowTelegramOutput extends RecordingOutput {
+    async send(content, options) {
+      sendStarted();
+      await sendGate;
+      return super.send(content, options);
+    }
+  }
+  const output = new SlowTelegramOutput();
+  const signals = new EventEmitter();
+  const app = await startTestApp(t, {
+    dependencies: {
+      process: signals,
+      timers: { setInterval, clearInterval, setTimeout, clearTimeout },
+      shutdownTimeoutMs: 100,
+      channelFactories: {
+        createSources: () => [new RecordingSource([techArticle('rust-2', 'Rust 2.0 compiler ships async closures')])],
+        createAI: () => new RecordingAI('Tóm tắt'),
+        createOutput: () => output,
+      },
+    },
+  });
+  const ids = await createCredentialsViaApi(app.api);
+  await createChannelViaApi(app.api, ids);
+  assert.equal((await resumeViaApi(app.api, 'telegram-ops')).status, 200);
+  const queued = await app.api('/api/channels/telegram-ops/run', { as: 'operator', method: 'POST' });
+  assert.equal(queued.status, 202);
+  await sending;
+
+  signals.emit('SIGTERM', 'SIGTERM');
+  const closing = app.handle.close();
+  await waitUntil(() => app.logs.some(line => /still in flight after the .* shutdown wait/.test(line)), { message: 'the overrun was not logged' });
+  await waitUntil(() => !app.handle.server.listening, { message: 'the HTTP server was not closed' });
+  assert.doesNotThrow(() => app.handle.runtime.listChannels(), 'the database stays open while the send is in flight');
+  assert.equal(readLeaseRows(app.dataDir).length, 1, 'the lease is kept while the send is in flight');
+  let closed = false;
+  closing.then(() => { closed = true; });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(closed, false, 'shutdown waits for the send past the shutdown wait');
+
+  releaseSend();
+  await closing;
+  assert.ok(app.logs.some(line => /run in flight has finished; closing the database/.test(line)));
+  assert.throws(() => app.handle.runtime.listChannels(), /not open/i, 'the database is closed after the run');
+  assert.equal(output.calls.length, 1);
+
+  // What the next process finds: the send is committed and the channel is free.
+  const db = openDatabase({ dataDir: app.dataDir });
+  try {
+    const store = new SQLiteDeliveryStore(createNodeSqlStorage(db));
+    await store.initialize();
+    const attempts = (await store.list('attempts')).filter(attempt => attempt.kind !== 'generation');
+    assert.deepEqual(attempts.map(attempt => attempt.state === 'attempting'), [false], 'the output attempt was committed');
+    const machine = new DeliveryStateMachine({
+      store,
+      channelId: 'telegram-ops',
+      clock: () => new Date(Date.parse(attempts[0].deadlineAt) + 1_000),
+    });
+    assert.equal((await machine.recoverStaleAttempts()).outputAmbiguous, 0);
+    assert.equal((await store.get('channel_state', 'telegram-ops')).mutationState, 'free');
+    assert.deepEqual((await machine.queryDeliveries({})).map(delivery => delivery.state), ['succeeded']);
+    assert.equal(db.prepare('SELECT status FROM app_runs WHERE id = ?').get(queued.body.runId).status, 'success');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM app_runtime_lease').get().count, 0, 'the lease was released after the run');
+  } finally {
+    closeDatabase(db);
+  }
+});
+
+test('startup logs the shutdown wait and the stop grace period it needs', async t => {
+  const dataDir = await tempDir(t);
+  const { server, logs } = await start(dataDir, { env: { SHUTDOWN_WAIT_SECONDS: '90' } });
+  t.after(() => server.close());
+  assert.ok(logs.some(line => /shutdown wait 90 s, SHUTDOWN_WAIT_SECONDS.*stop grace period of at least 105 s/.test(line)), logs.join('\n'));
 });
 
 test('production verifies against the team JWKS; an unreachable JWKS is a logged 503, never a bypass', async t => {

@@ -73,6 +73,7 @@ test('create stores a validated channel as version 1', async t => {
     ai: { provider: 'claude', model: null, name: null, baseUrl: null, apiKeyCredentialId: null, gateway: null },
     telegram: { botTokenCredentialId: null, chatIdCredentialId: null },
     limits: { ...DEFAULT_LIMITS },
+    cutoverRequired: false,
     version: 1,
     createdAt: '2026-10-03T00:00:00.000Z',
     updatedAt: '2026-10-03T00:00:00.000Z',
@@ -81,6 +82,7 @@ test('create stores a validated channel as version 1', async t => {
   const row = storage.sql.exec('SELECT * FROM app_channels').one();
   assert.equal(row.enabled, 1);
   assert.equal(row.not_before, '2026-10-03T00:00:00.000Z');
+  assert.equal(row.cutover_required, 0);
   assert.deepEqual(Object.keys(JSON.parse(row.config_json)), ['sources', 'prompt', 'ai', 'telegram', 'limits']);
   assert.deepEqual(channels.get('telegram-ops'), created);
   assert.equal(channels.get('missing'), null);

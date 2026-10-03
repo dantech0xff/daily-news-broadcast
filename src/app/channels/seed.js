@@ -3,6 +3,10 @@
  * with the current production settings of the Cloudflare Worker channel
  * (`wrangler.toml` + `defineChannels()`), paused and without credentials.
  * Operators enter credentials and resume the channel at the cutover gate.
+ *
+ * The seeded channel is marked `cutoverRequired`: it cannot be resumed (or
+ * otherwise start delivering) until its `notBefore` cutover instant is set,
+ * so nothing published before the cutover is posted.
  */
 
 import { IT_AUDIENCE } from '../../channels/definitions.js';
@@ -79,7 +83,7 @@ export async function seedDefaultChannels({
 
   await pauseChannel(SEED_CHANNEL_ID, { operatorId: actor, reason: SEED_PAUSE_REASON });
   try {
-    channelRepository.create(telegramMainSeedConfig(), { actor, now: clock() });
+    channelRepository.create(telegramMainSeedConfig(), { actor, now: clock(), cutoverRequired: true });
   } catch (error) {
     // Another process seeded between the emptiness check and the insert.
     if (error instanceof ChannelConflictError && error.code === 'channel_exists') return { seeded: false, channelIds: [] };

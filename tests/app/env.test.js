@@ -112,28 +112,48 @@ test('invalid values are rejected without echoing them', () => {
   }
 });
 
-test('ACCESS_JWKS_FILE is refused in production and accepted otherwise', () => {
-  const production = problemsOf({ ...BASE, NODE_ENV: 'production', ACCESS_JWKS_FILE: '/tmp/dev-jwks.json' });
-  assert.match(production.message, /ACCESS_JWKS_FILE/);
-  assert.match(production.message, /production/);
+test('ACCESS_JWKS_FILE is accepted only when NODE_ENV is exactly development or test', () => {
+  for (const nodeEnv of [undefined, '', 'production', 'prod', 'Production', 'staging', 'Development', 'testing']) {
+    const refused = problemsOf({ ...BASE, NODE_ENV: nodeEnv, ACCESS_JWKS_FILE: '/tmp/dev-jwks.json' });
+    assert.ok(refused.problems.some(problem => problem.startsWith('ACCESS_JWKS_FILE')), `NODE_ENV=${nodeEnv}`);
+    assert.match(refused.message, /NODE_ENV is exactly "development" or "test"/);
+  }
 
-  const development = loadAppConfig({ ...BASE, NODE_ENV: 'development', ACCESS_JWKS_FILE: 'dev/jwks.json' });
-  assert.equal(development.access.jwksFile, resolve('dev/jwks.json'));
-  assert.equal(development.access.issuer, 'https://team.cloudflareaccess.com', 'the issuer is still verified');
+  for (const nodeEnv of ['development', 'test', ' test ']) {
+    const local = loadAppConfig({ ...BASE, NODE_ENV: nodeEnv, ACCESS_JWKS_FILE: 'dev/jwks.json' });
+    assert.equal(local.access.jwksFile, resolve('dev/jwks.json'), `NODE_ENV=${nodeEnv}`);
+    assert.equal(local.access.issuer, 'https://team.cloudflareaccess.com', 'the issuer is still verified');
+  }
 
-  const production2 = loadAppConfig({ ...BASE, NODE_ENV: 'production' });
-  assert.equal(production2.production, true);
-  assert.equal(production2.access.jwksFile, null);
+  const production = loadAppConfig({ ...BASE, NODE_ENV: 'production' });
+  assert.equal(production.production, true);
+  assert.equal(production.access.jwksFile, null);
 });
 
-test('with ACCESS_JWKS_FILE outside production the issuer defaults to the dev issuer; production still requires the team domain', () => {
+test('with ACCESS_JWKS_FILE under development or test the issuer defaults to the dev issuer; anywhere else the team domain is required', () => {
   const { ACCESS_TEAM_DOMAIN: _omit, ...withoutTeam } = BASE;
-  const development = loadAppConfig({ ...withoutTeam, ACCESS_JWKS_FILE: 'dev/jwks.json' });
-  assert.equal(development.access.issuer, DEV_ACCESS_ISSUER);
+  for (const nodeEnv of ['development', 'test']) {
+    const local = loadAppConfig({ ...withoutTeam, NODE_ENV: nodeEnv, ACCESS_JWKS_FILE: 'dev/jwks.json' });
+    assert.equal(local.access.issuer, DEV_ACCESS_ISSUER);
+  }
   assert.match(problemsOf(withoutTeam).message, /ACCESS_TEAM_DOMAIN/);
-  const production = problemsOf({ ...withoutTeam, NODE_ENV: 'production', ACCESS_JWKS_FILE: 'dev/jwks.json' });
-  assert.ok(production.problems.some(problem => problem.startsWith('ACCESS_TEAM_DOMAIN')));
-  assert.ok(production.problems.some(problem => problem.startsWith('ACCESS_JWKS_FILE')));
+  for (const nodeEnv of [undefined, 'production', 'prod']) {
+    const refused = problemsOf({ ...withoutTeam, NODE_ENV: nodeEnv, ACCESS_JWKS_FILE: 'dev/jwks.json' });
+    assert.ok(refused.problems.some(problem => problem.startsWith('ACCESS_TEAM_DOMAIN')), `NODE_ENV=${nodeEnv}`);
+    assert.ok(refused.problems.some(problem => problem.startsWith('ACCESS_JWKS_FILE')), `NODE_ENV=${nodeEnv}`);
+  }
+});
+
+test('SHUTDOWN_WAIT_SECONDS defaults to 120 seconds and is bounded', () => {
+  assert.equal(loadAppConfig(BASE).shutdownWaitMs, 120_000);
+  assert.equal(loadAppConfig({ ...BASE, SHUTDOWN_WAIT_SECONDS: '300' }).shutdownWaitMs, 300_000);
+  assert.equal(loadAppConfig({ ...BASE, SHUTDOWN_WAIT_SECONDS: '1' }).shutdownWaitMs, 1_000);
+  assert.equal(loadAppConfig({ ...BASE, SHUTDOWN_WAIT_SECONDS: '3600' }).shutdownWaitMs, 3_600_000);
+  for (const invalid of ['0', '3601', '1.5', '-5', 'two minutes', '120s']) {
+    const error = problemsOf({ ...BASE, SHUTDOWN_WAIT_SECONDS: invalid });
+    assert.ok(error.problems.some(problem => problem.startsWith('SHUTDOWN_WAIT_SECONDS')), invalid);
+  }
+  assert.equal(problemsOf({ ...BASE, SHUTDOWN_WAIT_SECONDS: 'two minutes' }).message.includes('two minutes'), false);
 });
 
 test('only the persistent file cache is allowed', () => {

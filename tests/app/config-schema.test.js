@@ -5,6 +5,7 @@ import {
   AI_PROVIDERS,
   ChannelValidationError,
   DEFAULT_LIMITS,
+  MAX_BATCH_DELAY_MS,
   aiCredentialRequirements,
   listCredentialReferences,
   validateChannelConfig,
@@ -156,6 +157,24 @@ test('limits use defaults and enforce integer ranges', () => {
     'limits.maxArticlesPerSource:invalid_type',
     'limits.concurrency:out_of_range',
   ]);
+});
+
+test('batchSize × delayMs is capped at 10 minutes so one run cannot hold the shared queue', () => {
+  assert.equal(MAX_BATCH_DELAY_MS, 600_000);
+  const limits = (batchSize, delayMs) => minimalInput({ limits: { batchSize, delayMs } });
+  for (const [batchSize, delayMs] of [[1, 600_000], [10, 60_000], [100, 6_000], [100, 0], [5, 120_000]]) {
+    assert.deepEqual(validateChannelConfig(limits(batchSize, delayMs)).limits, { ...DEFAULT_LIMITS, batchSize, delayMs }, `${batchSize} × ${delayMs}`);
+  }
+  for (const [batchSize, delayMs] of [[1, 600_001], [10, 600_000], [2, 300_001], [100, 6_001]]) {
+    assert.deepEqual(issuesOf(limits(batchSize, delayMs)), ['limits.delayMs:batch_delay_too_long'], `${batchSize} × ${delayMs}`);
+  }
+  assert.throws(
+    () => validateChannelConfig(limits(10, 600_000)),
+    error => /batchSize × delayMs tối đa 600000 ms \(10 phút\)/.test(error.issues[0].message),
+  );
+  // A value already out of range is reported once, not again as a product.
+  assert.deepEqual(issuesOf(limits(101, 600_000)), ['limits.batchSize:out_of_range']);
+  assert.deepEqual(issuesOf(limits(2, 3_600_001)), ['limits.delayMs:out_of_range']);
 });
 
 test('prompt language, style, audience, and custom system prompt are validated', () => {

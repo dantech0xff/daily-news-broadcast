@@ -22,6 +22,7 @@ import {
   requireActor,
 } from '../channels/validation.js';
 import { readQueryInteger } from '../db/content-repository.js';
+import { assertCutoverReady } from './cutover-guard.js';
 import { RuntimeError } from './errors.js';
 
 export const CONTROL_ACTIONS = Object.freeze([
@@ -35,6 +36,8 @@ export const NEW_CHANNEL_PAUSE_REASON = 'New channel starts paused until an oper
 // Actions that call the channel's AI or output, or compare its output
 // topology, need the channel built with its credentials.
 const BUILD_REQUIRED_ACTIONS = new Set(['resume', 'retry-generation', 'retry-output', 'restore-topology']);
+// Actions that start delivering: refused while the channel's cutover instant is unset.
+const CUTOVER_GUARDED_ACTIONS = new Set(['resume', 'retry-output']);
 const DELIVERY_TARGET_ACTIONS = new Set(['retry-generation', 'retry-output', 'restore-topology', 'confirm-delivered', 'abandon']);
 const OUTPUT_TARGET_ACTIONS = new Set(['retry-output', 'confirm-delivered']);
 const PARAM_KEYS = Object.freeze([
@@ -119,8 +122,10 @@ export class ChannelControls {
   }
 
   /**
-   * Apply one operator action. Resume is refused unless the channel builds
-   * with every credential it needs; the error names the missing slots only.
+   * Apply one operator action. Resume and output retries are refused
+   * (`cutover_required`) while a cutover channel's `notBefore` is unset.
+   * Resume is refused unless the channel builds with every credential it
+   * needs; the error names the missing slots only.
    * @param {string} channelId
    * @param {string} action One of `CONTROL_ACTIONS`.
    * @param {ControlParams} params
@@ -133,6 +138,7 @@ export class ChannelControls {
     const normalized = readControlParams(action, params);
     const record = this._channels.get(channelId);
     if (!record) throw new ChannelNotFoundError(channelId);
+    if (CUTOVER_GUARDED_ACTIONS.has(action)) assertCutoverReady(record);
     const channel = BUILD_REQUIRED_ACTIONS.has(action) ? await this._buildChannel(record) : { id: record.id };
     try {
       const result = await this._executeRecoveryControl(channel, { ...normalized, action, operatorId }, {

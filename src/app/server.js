@@ -15,9 +15,15 @@
  * Listening before the lease keeps `/healthz` alive while a previous
  * instance's lease expires.
  *
- * Shutdown (SIGTERM/SIGINT or `close()`): stop the runtime (waits for the
- * run in flight, releases the lease) → end event streams and close the HTTP
- * server → close the database.
+ * Shutdown (SIGTERM/SIGINT or `close()`): stop the runtime (no new runs or
+ * ticks; waits up to `SHUTDOWN_WAIT_SECONDS` for the run in flight) → end
+ * event streams and close the HTTP server → wait, without a limit, until
+ * nothing is in flight (the lease stays renewed meanwhile, then is released)
+ * → close the database. A run is never cut short and the database is never
+ * closed under it: past the wait the process keeps running until the run has
+ * committed, then exits on its own (no `process.exit()`). The container stop
+ * grace period must exceed the wait by at least 15 seconds; a kill in the
+ * middle of a send leaves that output to be reconciled as ambiguous.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -29,7 +35,7 @@ import { FileCache } from '../core/caches.js';
 import { SQLiteDeliveryStore } from '../core/sqlite-delivery-store.js';
 import { createAccessKeySet, createAccessVerifier } from './auth/access-jwt.js';
 import { createRoleResolver } from './auth/roles.js';
-import { AppConfigError, loadAppConfig } from './config/env.js';
+import { AppConfigError, STOP_GRACE_MARGIN_SECONDS, loadAppConfig } from './config/env.js';
 import { createApp } from './create-app.js';
 import { backupBeforeDeliveryStoreUpgrade, runAppMigrations } from './db/app-migrations.js';
 import { createNodeSqlStorage } from './db/node-sql-storage.js';
@@ -79,6 +85,7 @@ const SHUTDOWN_SIGNALS = Object.freeze(['SIGTERM', 'SIGINT']);
  *   - `keySet`: Access key resolver replacing the configured JWKS source.
  *   - `channelFactories`: plugin constructors for sources, AI, and output.
  *   - `cron`/`timers`/`clock`: scheduler clock and timer seams.
+ *   - `shutdownTimeoutMs`: overrides `SHUTDOWN_WAIT_SECONDS`.
  *   - `process`: where SIGTERM/SIGINT handlers are registered; `null` registers none.
  * @returns {Promise<AppServer>}
  */
@@ -88,6 +95,7 @@ export async function startServer(env = process.env, dependencies = {}) {
   const signals = dependencies.process === undefined ? process : dependencies.process;
 
   const config = loadAppConfig(env);
+  const shutdownWaitMs = dependencies.shutdownTimeoutMs ?? config.shutdownWaitMs;
   const version = config.buildVersion ?? await readPackageVersion();
   const keySet = dependencies.keySet ?? await createAccessKeySet(config.access);
   const verifier = createAccessVerifier({
@@ -132,7 +140,7 @@ export async function startServer(env = process.env, dependencies = {}) {
       timers: dependencies.timers,
       leaseTtlMs: dependencies.leaseTtlMs,
       heartbeatMs: dependencies.heartbeatMs,
-      shutdownTimeoutMs: dependencies.shutdownTimeoutMs,
+      shutdownTimeoutMs: shutdownWaitMs,
       contentScanRetentionDays: config.retention.contentScanDays,
       runHistoryRetentionDays: config.retention.runHistoryDays,
     });
@@ -153,9 +161,10 @@ export async function startServer(env = process.env, dependencies = {}) {
     server = await listen(app, config.host, config.port);
     const { leased } = await runtime.start();
     logger.log?.(`[App] Listening on ${baseUrl(server)} (public origin ${config.publicOrigin}; Access keys from ${config.access.jwksFile ? 'the local ACCESS_JWKS_FILE' : config.access.certsUrl})`);
+    logger.log?.(`[App] On SIGTERM a run in flight is awaited (shutdown wait ${describeSeconds(shutdownWaitMs)}, SHUTDOWN_WAIT_SECONDS); give the container a stop grace period of at least ${describeSeconds(shutdownWaitMs + STOP_GRACE_MARGIN_SECONDS * 1_000)}`);
     if (!leased) logger.log?.('[App] Another instance holds the runtime lease; scheduling starts once it expires or is released');
   } catch (error) {
-    await shutdown({ runtime, server, closeEventStreams, db, logger, graceMs: 0 });
+    await shutdown({ runtime, server, closeEventStreams, db, logger, graceMs: 0, shutdownWaitMs });
     throw error;
   }
 
@@ -174,6 +183,7 @@ export async function startServer(env = process.env, dependencies = {}) {
         db,
         logger,
         graceMs: dependencies.serverCloseGraceMs ?? SERVER_CLOSE_GRACE_MS,
+        shutdownWaitMs,
       });
     }
     return closing;
@@ -197,12 +207,17 @@ function createFileCache(config, { clock }) {
   return new FileCache(config.cachePath, { now: () => clock().getTime() });
 }
 
-async function shutdown({ runtime, server, closeEventStreams, db, logger, graceMs }) {
+async function shutdown({ runtime, server, closeEventStreams, db, logger, graceMs, shutdownWaitMs }) {
   const failures = [];
+  let overran = false;
   if (runtime) {
     try {
-      const { timedOut } = await runtime.stop();
-      if (timedOut) logger.warn?.('[App] A run was still in flight at shutdown; its lease will expire on its own');
+      ({ timedOut: overran } = await runtime.stop());
+      if (overran) {
+        logger.warn?.(`[App] A run is still in flight after the ${describeSeconds(shutdownWaitMs)} shutdown wait. `
+          + 'The database, cache, and runtime lease stay open until it finishes, then the process exits. '
+          + 'Killing the process before then (or sending the signal again) leaves an output being sent to be reconciled as ambiguous on the next start.');
+      }
     } catch (error) {
       failures.push(error);
     }
@@ -213,14 +228,33 @@ async function shutdown({ runtime, server, closeEventStreams, db, logger, graceM
   } catch (error) {
     failures.push(error);
   }
-  try {
-    closeDatabase(db);
-  } catch (error) {
-    failures.push(error);
+  // Never close the database under a run that still has to commit.
+  let drained = true;
+  if (runtime) {
+    try {
+      await runtime.drain();
+      if (overran) logger.log?.('[App] The run in flight has finished; closing the database');
+    } catch (error) {
+      drained = false;
+      failures.push(error);
+    }
+  }
+  if (drained) {
+    try {
+      closeDatabase(db);
+    } catch (error) {
+      failures.push(error);
+    }
+  } else {
+    logger.error?.('[App] Left the database open: work in flight could not be confirmed finished');
   }
   if (failures.length > 0) {
     logger.error?.(`[App] Shutdown problems: ${failures.map(error => sanitizeRuntimeError(error)).join('; ')}`);
   }
+}
+
+function describeSeconds(ms) {
+  return `${Math.ceil(ms / 1_000)} s`;
 }
 
 function listen(app, host, port) {
